@@ -1,0 +1,3 @@
+# Dell iDRAC7 firmware binaries — user-downloaded, Dell-licensed, large.
+# Staged for the idrac_tftp role (playbooks/idrac_fw_staging.yml). Never commit.
+files/idrac-fw/*.d7

@@ -1,0 +1,35 @@
+---
+# Role: idrac_tftp — stand up a temporary TFTP server on hme-srv-01 to stage
+# iDRAC7 firmware for the two R720 iDRACs (192.168.1.252 + .253).
+#
+# Why TFTP: on iDRAC fw 1.23.23 the only reliable remote firmware method is
+# `racadm fwupdate -g -u -a <tftp-ip> -d <path>` (TFTP). `racadm remoteimage`
+# (HTTP) is a confirmed dead-end on this fw (see ~/git/idrac/NOTES.md). The
+# iDRACs pull the firmware over UDP/69, so the TFTP server must be on the same
+# LAN — hme-srv-01 (192.168.1.231) is the always-on ansible-managed box.
+#
+# TEMPORARY: tftpd-hpa binds :69 LAN-wide (unauthenticated). After the fw
+# upgrade completes, re-run the playbook with -e idrac_tftp_enabled=false to
+# stop + disable the daemon. The fw binaries themselves are gitignored
+# (Dell-licensed, user-supplied under files/idrac-fw/).
+
+# TFTP root the iDRACs pull from.
+idrac_tftp_root: /srv/tftp/idrac-fw
+
+# Where the user stages the extracted Dell firmimg.d7 files (renamed per
+# version). Relative to the playbook dir.
+idrac_fw_staging: "{{ playbook_dir }}/../files/idrac-fw"
+
+# The two staged firmware files (Dell ships both as firmimg.d7 — must be
+# renamed). The role fails if either is missing from idrac_fw_staging.
+idrac_fw_files:
+  - firmimg-2.30.30.30.d7
+  - firmimg-2.65.65.65.d7
+
+# true = install + start tftpd-hpa. false = teardown (stop + disable). Set
+# false and re-run after the upgrade to remove the LAN-wide TFTP daemon.
+idrac_tftp_enabled: true
+
+# tftpd-hpa listen address (:69 = all interfaces, LAN-reachable).
+idrac_tftp_address: ":69"
+idrac_tftp_options: "--secure --ipv4"

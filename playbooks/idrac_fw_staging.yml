@@ -1,0 +1,31 @@
+---
+# Stand up a temporary TFTP server on hme-srv-01 to stage iDRAC7 firmware for
+# the two R720 iDRACs (192.168.1.252 + .253), then tear it down after the
+# upgrade. See roles/idrac_tftp and ~/git/idrac/NOTES.md "Firmware upgrade
+# runbook".
+#
+# Run from WSL (the repo lives at /mnt/c/Users/Mike-/git/ansible, which is
+# world-writable so ansible.cfg is ignored — set paths via env vars):
+#
+#   PREREQ: place the Dell firmware binaries in files/idrac-fw/ first:
+#     firmimg-2.30.30.30.d7   (from iDRAC_with_Lifecycle_Controller_2.30.30.30.exe)
+#     firmimg-2.65.65.65.d7   (from iDRAC_with_Lifecycle_Controller_2.65.65.65.exe)
+#   (gitignored — Dell-licensed, user-supplied.)
+#
+# Stage TFTP + deploy the fw files:
+#   wsl bash -lc 'cd /mnt/c/Users/Mike-/git/ansible && \
+#     ANSIBLE_ROLES_PATH=roles ANSIBLE_INVENTORY=inventory \
+#     ANSIBLE_HOST_KEY_CHECKING=False \
+#     ansible-playbook playbooks/idrac_fw_staging.yml'
+#
+# Then run ~/git/idrac/idrac-fwupdate.py per iDRAC (2.30 then 2.65).
+#
+# Teardown after the upgrade (stop + disable the LAN-wide TFTP daemon):
+#   ... ansible-playbook playbooks/idrac_fw_staging.yml -e idrac_tftp_enabled=false
+
+- name: TFTP staging for iDRAC7 firmware upgrade (hme-srv-01)
+  hosts: hme-srv-01
+  become: yes
+  roles:
+    - role: idrac_tftp
+      tags: [idrac, tftp]

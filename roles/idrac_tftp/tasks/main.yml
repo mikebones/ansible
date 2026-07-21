@@ -1,0 +1,117 @@
+---
+# Role: idrac_tftp — temporary TFTP server on hme-srv-01 to stage iDRAC7 fw.
+# See defaults/main.yml. Set idrac_tftp_enabled=false to tear down after the
+# upgrade.
+
+# --- verify the user staged the firmware files -----------------------------
+# Fail fast with a clear message if the Dell firmware binaries are missing
+# (they're the manual prerequisite — Dell-licensed, gitignored, user-supplied).
+- name: Verify staged firmware files exist in {{ idrac_fw_staging }}
+  stat:
+    path: "{{ idrac_fw_staging }}/{{ item }}"
+  loop: "{{ idrac_fw_files }}"
+  register: idrac_fw_stat
+  changed_when: false
+
+- name: Fail if any firmware file is missing (user prerequisite not done)
+  fail:
+    msg: >-
+      Missing {{ item.item }} in {{ idrac_fw_staging }}. Download the Dell
+      iDRAC7 firmware .exe (2.30.30.30 and 2.65.65.65) from the R720 driver
+      page, run each on Windows to extract firmimg.d7, rename to
+      {{ item.item }}, and place it in {{ idrac_fw_staging }}/. See
+      ~/git/idrac/NOTES.md "Firmware upgrade runbook".
+  loop: "{{ idrac_fw_stat.results }}"
+  when: not item.stat.exists
+
+# --- install + configure tftpd-hpa -----------------------------------------
+- name: Install tftpd-hpa + tftp client
+  apt:
+    name:
+      - tftpd-hpa
+      - tftp-hpa
+    state: present
+    update_cache: yes
+  when: idrac_tftp_enabled | bool
+  register: idrac_tftp_install
+
+- name: Ensure TFTP root exists
+  file:
+    path: "{{ idrac_tftp_root }}"
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+  when: idrac_tftp_enabled | bool
+
+- name: Render /etc/default/tftpd-hpa
+  template:
+    src: tftpd-hpa.j2
+    dest: /etc/default/tftpd-hpa
+    mode: "0644"
+    backup: yes
+  register: idrac_tftp_conf
+  when: idrac_tftp_enabled | bool
+
+- name: Deploy staged firmware files to TFTP root
+  copy:
+    src: "{{ idrac_fw_staging }}/{{ item }}"
+    dest: "{{ idrac_tftp_root }}/{{ item }}"
+    mode: "0644"
+    owner: root
+    group: root
+  loop: "{{ idrac_fw_files }}"
+  when: idrac_tftp_enabled | bool
+  register: idrac_fw_deploy
+
+- name: Reload systemd + (re)start tftpd-hpa
+  systemd:
+    name: tftpd-hpa
+    state: restarted
+    enabled: yes
+    daemon_reload: yes
+  when:
+    - idrac_tftp_enabled | bool
+    - idrac_tftp_install.changed or idrac_tftp_conf.changed or idrac_fw_deploy.changed
+
+- name: Ensure tftpd-hpa is running + enabled (no-op if already up)
+  systemd:
+    name: tftpd-hpa
+    state: started
+    enabled: yes
+  when: idrac_tftp_enabled | bool
+
+# --- self-check: the daemon serves the files -------------------------------
+- name: Self-check TFTP get of a firmware file
+  command: "tftp 127.0.0.1 -c get {{ idrac_fw_files[0] }} /tmp/_idrac_fw_probe"
+  changed_when: false
+  when: idrac_tftp_enabled | bool
+
+- name: Remove self-check probe
+  file:
+    path: /tmp/_idrac_fw_probe
+    state: absent
+  changed_when: false
+  when: idrac_tftp_enabled | bool
+
+- name: Report TFTP readiness
+  debug:
+    msg: >-
+      tftpd-hpa serving {{ idrac_tftp_root }} on {{ idrac_tftp_address }}.
+      iDRACs can pull: `racadm fwupdate -g -u -a {{ ansible_host |
+      default('192.168.1.231') }} -d <file>`. Teardown after the upgrade:
+      re-run with -e idrac_tftp_enabled=false.
+  when: idrac_tftp_enabled | bool
+
+# --- teardown (idrac_tftp_enabled=false) -----------------------------------
+- name: Stop + disable tftpd-hpa (teardown)
+  systemd:
+    name: tftpd-hpa
+    state: stopped
+    enabled: no
+  when: not (idrac_tftp_enabled | bool)
+
+- name: Report teardown
+  debug:
+    msg: "tftpd-hpa stopped + disabled (LAN-wide TFTP daemon removed)."
+  when: not (idrac_tftp_enabled | bool)
