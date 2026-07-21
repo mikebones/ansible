@@ -1,0 +1,42 @@
+---
+# WS5 Phase 3: node-exporter textfile collectors (host-side cron -> *.prom ->
+# node-exporter textfile dir -> scraped by the DaemonSet configured in
+# manifests/charts/prometheus/values.yaml).
+#
+# Run from WSL (repo at /mnt/c/Users/Mike-/git/ansible, world-writable so
+# ansible.cfg is ignored — set paths via env vars):
+#
+# 1. Render + review ONLY (writes scripts + /etc/cron.d/node-exporter-textfile.pending,
+#    applies nothing live):
+#      wsl bash -lc 'cd /mnt/c/Users/Mike-/git/ansible && \
+#        ANSIBLE_ROLES_PATH=roles ANSIBLE_INVENTORY=inventory \
+#        ANSIBLE_HOST_KEY_CHECKING=False \
+#        ansible-playbook playbooks/node_exporter_textfile.yml'
+#      then check the rendered cron: ssh administrator@192.168.1.231 \
+#        'sudo cat /etc/cron.d/node-exporter-textfile.pending'
+#
+# 2. ACTIVATE the ZFS collector on hme-srv-01 (installs the cron + seeds the
+#    first zfs.prom; node-exporter exposes node_zfs_* on the next scrape):
+#      ... ansible-playbook playbooks/node_exporter_textfile.yml \
+#        -e node_textfile_apply=true
+#    Verify: kubectl exec <node-exporter-pod-on-hme-srv-01> -- \
+#      wget -qO- localhost:9100/metrics | grep node_zfs
+#
+# 3. (OPT-IN, RISK) NFS wedge probe on hme-srv-02/03. The probe does a bounded
+#    mount.nfs on the kernel-7.0 client; a single sequential mount is low risk
+#    vs the concurrent-mount storm that wedged the client originally, but NOT
+#    zero. hme-srv-02/03 are cordoned precisely to avoid NFS mount activity —
+#    this is the canary that tells you when they're safe to un-cordon. Watch
+#    the first few cycles:
+#      ... ansible-playbook playbooks/node_exporter_textfile.yml \
+#        -e node_textfile_apply=true -e node_textfile_nfs_probe=true \
+#        -l hme-srv-02,hme-srv-03
+#
+# E.1 (kernel-drift) needs no textfile collector: node-exporter exposes
+# node_uname_info{release} already; the Phase 5b E.1 alert queries that.
+
+- name: node-exporter textfile collectors (home_server)
+  hosts: home_server
+  become: yes
+  roles:
+    - role: node_exporter_textfile

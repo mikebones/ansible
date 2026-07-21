@@ -1,0 +1,12 @@
+# /etc/cron.d/node-exporter-textfile — rendered by roles/node_exporter_textfile
+# (WS5 Phase 5b). Activated only when node_textfile_apply=true. Each enabled
+# collector writes its *.prom file to {{ node_textfile_dir }} on schedule; the
+# node-exporter DaemonSet scrapes that dir read-only.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+{% if node_textfile_zfs_enabled %}
+{{ node_textfile_zfs_cron }} root {{ node_textfile_script_dir }}/node-exporter-textfile-zfs.sh
+{% endif %}
+{% if node_textfile_nfs_probe %}
+{{ node_textfile_nfs_cron }} root {{ node_textfile_script_dir }}/node-exporter-textfile-nfs-probe.sh
+{% endif %}

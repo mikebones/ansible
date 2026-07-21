@@ -1,0 +1,91 @@
+---
+# Role: node_exporter_textfile — render host-side textfile collector scripts +
+# a cron job that writes *.prom files into the node-exporter textfile dir.
+# See defaults/main.yml for the gated-apply convention + the NFS-probe risk note.
+
+# --- textfile directory (host side; node-exporter mounts it read-only) ------
+- name: Ensure textfile dir exists ({{ node_textfile_dir }})
+  file:
+    path: "{{ node_textfile_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# --- ZFS collector (C.1-C.3) ------------------------------------------------
+- name: Assert zpool is present (ZFS collector enabled)
+  command: which zpool
+  register: node_textfile_zfs_check
+  changed_when: false
+  failed_when: node_textfile_zfs_check.rc != 0
+  when: node_textfile_zfs_enabled | bool
+
+- name: Render ZFS textfile collector script
+  template:
+    src: zfs.prom.sh.j2
+    dest: "{{ node_textfile_script_dir }}/node-exporter-textfile-zfs.sh"
+    owner: root
+    group: root
+    mode: "0755"
+  when: node_textfile_zfs_enabled | bool
+  register: node_textfile_zfs_script
+
+# --- NFS wedge probe (D.1-D.2) ----------------------------------------------
+# RISK: see defaults/main.yml. Rendered only when node_textfile_nfs_probe=true.
+- name: Render NFS wedge probe script
+  template:
+    src: nfs_probe.prom.sh.j2
+    dest: "{{ node_textfile_script_dir }}/node-exporter-textfile-nfs-probe.sh"
+    owner: root
+    group: root
+    mode: "0755"
+  when: node_textfile_nfs_probe | bool
+  register: node_textfile_nfs_script
+
+# --- render cron for review -------------------------------------------------
+- name: Render cron file to {{ node_textfile_cron_pending }} (review; not live)
+  template:
+    src: cron.j2
+    dest: "{{ node_textfile_cron_pending }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: node_textfile_cron_rendered
+
+- name: Report rendered cron location
+  debug:
+    msg: >-
+      Rendered {{ node_textfile_cron_pending }}
+      (zfs={{ node_textfile_zfs_enabled }} nfs_probe={{ node_textfile_nfs_probe }}).
+      Review it, then re-run with -e node_textfile_apply=true to install the cron
+      live and seed the first *.prom files.
+
+# --- gated apply: install cron live + seed ----------------------------------
+- name: Install cron live (node_textfile_apply=true)
+  copy:
+    src: "{{ node_textfile_cron_pending }}"
+    dest: "{{ node_textfile_cron_path }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  when: node_textfile_apply | bool
+
+- name: Seed ZFS *.prom now (run the collector once)
+  command: "{{ node_textfile_script_dir }}/node-exporter-textfile-zfs.sh"
+  when: (node_textfile_apply | bool) and (node_textfile_zfs_enabled | bool)
+  changed_when: false
+
+- name: Seed NFS probe *.prom now (run the probe once — see wedge RISK)
+  command: "{{ node_textfile_script_dir }}/node-exporter-textfile-nfs-probe.sh"
+  when: (node_textfile_apply | bool) and (node_textfile_nfs_probe | bool)
+  changed_when: false
+
+- name: Report activation
+  debug:
+    msg: >-
+      node_textfile_apply=true: cron installed at {{ node_textfile_cron_path }}
+      (zfs={{ node_textfile_zfs_enabled }} nfs_probe={{ node_textfile_nfs_probe }}).
+      First *.prom files seeded; node-exporter will expose them on the next scrape.
+  when: node_textfile_apply | bool

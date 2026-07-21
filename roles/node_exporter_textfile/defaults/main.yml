@@ -1,0 +1,71 @@
+---
+# Role: node_exporter_textfile — host-side cron scripts that write *.prom files
+# to the node-exporter textfile directory, exposing custom metrics for the WS5
+# Phase 5b alerts (C ZFS on hme-srv-01, D.1-D.2 NFS-wedge on hme-srv-02/03).
+# E.1 (kernel-drift) uses node-exporter's built-in node_uname_info, not a
+# textfile collector.
+#
+# The node-exporter DaemonSet is configured (manifests/charts/prometheus/values.yaml,
+# prometheus-node-exporter.extraArgs --collector.textfile.directory + a readOnly
+# hostPath mount of this dir) to pick up whatever *.prom files appear here. This
+# role creates the dir on the host + installs the cron scripts that populate it.
+#
+# E.1 (kernel-drift) does NOT need a textfile collector: node-exporter already
+# exposes node_uname_info{release="..."} (uname collector, on by default). The
+# Phase 5b E.1 alert queries that directly.
+#
+# Apply convention mirrors roles/sanoid / roles/containerd: scripts + the cron
+# file are rendered for review by default; pass -e node_textfile_apply=true to
+# install the cron live + seed the first *.prom. Never default
+# node_textfile_apply to true.
+
+# --- textfile directory (must match the hostPath in prometheus values) ------
+node_textfile_dir: /var/lib/node_exporter_textfile
+
+# --- master gate ------------------------------------------------------------
+# false = render scripts + cron to .pending (review). true = install the cron
+# live and run each enabled script once to seed the .prom files.
+node_textfile_apply: false
+
+# --- per-collector enable flags (which scripts to render) -------------------
+# ZFS collector (C.1-C.3). Set true on hme-srv-01 (host_vars). Requires zpool.
+node_textfile_zfs_enabled: false
+# NFS wedge probe (D.1-D.2). Set true on hme-srv-02/03 to render the probe.
+# RISK: see nfs_probe section below; the master gate + this flag are both
+# required, and the probe should only be enabled once the operator accepts the
+# wedge risk on the kernel-7.0 nodes.
+node_textfile_nfs_probe: false
+
+# --- ZFS collector config ---------------------------------------------------
+# Pools to report. Defaults to all imported pools on the host; override in
+# host_vars to pin a specific list (e.g. [data]).
+node_textfile_zfs_pools: []
+# Cron schedule for the ZFS collector.
+node_textfile_zfs_cron: "*/5 * * * *"
+
+# --- NFS wedge probe config (D.1-D.2) ---------------------------------------
+# A lightweight mount.nfs + umount canary: attempts to mount an export from the
+# NFS server (hme-srv-01) and reports rc / duration. On a wedged kernel-7.0
+# client the mount times out (rc 124 via `timeout`); on a healthy client it
+# mounts + umounts in <1s. The Phase 5b alerts fire on rc != 0 / success == 0.
+#
+# RISK: the kernel-7.0 bug on hme-srv-02/03 is triggered by NFS mount activity.
+# A single bounded, sequential mount+umount is LOW risk compared to the
+# concurrent-mount storm that wedged the client originally, but it is NOT zero
+# — on a fragile client the probe's own mount could contribute to a wedge.
+# hme-srv-02/03 are intentionally cordoned (no NFS apps scheduled) precisely to
+# avoid this; the probe is the canary that tells you when the client is healthy
+# enough to un-cordon. Keep node_textfile_nfs_probe=false until you have
+# decided to run that canary, and watch the first few cycles.
+node_textfile_nfs_probe_server: 192.168.1.231   # hme-srv-01 (NFS server)
+node_textfile_nfs_probe_export: /data/home
+# Read-only, v3, TCP, short timeout so a wedge returns rc 124 quickly instead
+# of hanging the cron job.
+node_textfile_nfs_probe_mountopts: "ro,nfsvers=3,tcp,soft,timeo=600,retrans=1"
+node_textfile_nfs_probe_timeout_secs: 15
+node_textfile_nfs_cron: "*/5 * * * *"
+
+# --- install paths ----------------------------------------------------------
+node_textfile_script_dir: /usr/local/sbin
+node_textfile_cron_path: /etc/cron.d/node-exporter-textfile
+node_textfile_cron_pending: /etc/cron.d/node-exporter-textfile.pending

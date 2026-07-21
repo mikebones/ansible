@@ -54,3 +54,16 @@ sanoid_templates:
   home:  { hourly: 0, daily: 7, weekly: 4, monthly: 3 }
   media: { hourly: 0, daily: 2, weekly: 0, monthly: 0 }
   watch: { daily: 7 }
+
+# --- node-exporter textfile collectors (roles/node_exporter_textfile) --------
+# WS5 Phase 3: render the ZFS pool/ARC collector script on this host. The cron
+# + first *.prom seed are gated by node_textfile_apply (default false) on the
+# command line; this flag only selects WHICH collector renders. The metrics
+# (node_zfs_pool_health, node_zfs_pool_scrub_in_progress, node_zfs_pool_scrub_days_since,
+# node_zfs_pool_scrub_errors, node_zfs_pool_data_errors, node_zfs_arc_size_bytes,
+# node_zfs_arc_max_bytes) feed the WS5 Phase 5b C.1-C.3 alerts + the storage
+# dashboard ZFS panels.
+# hme-srv-02/03's NFS wedge probe is a separate, opt-in collector
+# (-e node_textfile_nfs_probe=true) — NOT enabled here.
+node_textfile_zfs_enabled: true
+node_textfile_zfs_pools: [data]

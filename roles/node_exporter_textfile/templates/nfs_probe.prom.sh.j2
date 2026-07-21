@@ -1,0 +1,60 @@
+#!/bin/bash
+# node-exporter textfile collector: NFS client wedge canary (WS5 Phase 5b, D.1-D.2).
+# Rendered by roles/node_exporter_textfile onto hme-srv-02/03 (kernel-7.0 NFS
+# client). Attempts a bounded, read-only mount of one export from the NFS server
+# (hme-srv-01) + immediate umount, and reports rc / duration / success.
+#
+# On a wedged client `timeout` returns 124 (mount hung); on a healthy client the
+# whole cycle is <1s. The Phase 5b D.2 alert fires on success == 0 / rc != 0.
+#
+# RISK (see defaults/main.yml): this probe performs an NFS mount on the
+# kernel-7.0 client. A single bounded sequential mount is low risk vs the
+# concurrent-mount storm that originally wedged the client, but it is NOT zero.
+# Keep the probe gated off until you have decided to run the canary, and watch
+# the first few cycles.
+#
+# Emitted metrics:
+#   node_nfswedge_probe_rc{server,export}        mount rc (0=ok, 124=timeout, other=error)
+#   node_nfswedge_probe_success{server,export}   1 if rc==0 else 0
+#   node_nfswedge_probe_duration_seconds{server,export}  wall time of the mount attempt
+set -u
+
+OUT_DIR="{{ node_textfile_dir }}"
+TMP="${OUT_DIR}/.nfs_probe.prom.$$"
+FINAL="${OUT_DIR}/nfs_probe.prom"
+SERVER="{{ node_textfile_nfs_probe_server }}"
+EXPORT="{{ node_textfile_nfs_probe_export }}"
+OPTS="{{ node_textfile_nfs_probe_mountopts }}"
+TIMEOUT={{ node_textfile_nfs_probe_timeout_secs }}
+
+MNT=$(mktemp -d /var/run/nfs-probe.XXXXXX)
+start=$(date +%s.%N 2>/dev/null || date +%s)
+# `timeout` bounds the mount so a wedged client returns rc 124 instead of
+# hanging the cron job. soft + timeo make the kernel give up too.
+timeout "${TIMEOUT}" mount -t nfs -o "${OPTS}" "${SERVER}:${EXPORT}" "${MNT}" 2>/dev/null
+rc=$?
+end=$(date +%s.%N 2>/dev/null || date +%s)
+dur=$(awk -v s="$start" -v e="$end" 'BEGIN{printf "%.3f", e-s}')
+
+# Always try to clean up; ignore failures (a wedged client may not umount).
+if mountpoint -q "${MNT}" 2>/dev/null; then
+  timeout 10 umount "${MNT}" 2>/dev/null || true
+fi
+rmdir "${MNT}" 2>/dev/null || true
+
+if [ "$rc" -eq 0 ]; then ok=1; else ok=0; fi
+
+{
+  echo "# HELP node_nfswedge_probe_rc last mount.nfs rc (0=ok, 124=timeout, other=error)"
+  echo "# TYPE node_nfswedge_probe_rc gauge"
+  echo "# HELP node_nfswedge_probe_success 1 if the NFS mount probe succeeded, 0 otherwise"
+  echo "# TYPE node_nfswedge_probe_success gauge"
+  echo "# HELP node_nfswedge_probe_duration_seconds wall time of the NFS mount attempt"
+  echo "# TYPE node_nfswedge_probe_duration_seconds gauge"
+  echo "node_nfswedge_probe_rc{server=\"${SERVER}\",export=\"${EXPORT}\"} ${rc}"
+  echo "node_nfswedge_probe_success{server=\"${SERVER}\",export=\"${EXPORT}\"} ${ok}"
+  echo "node_nfswedge_probe_duration_seconds{server=\"${SERVER}\",export=\"${EXPORT}\"} ${dur}"
+} > "$TMP"
+
+mv -f "$TMP" "$FINAL"
+chmod 0644 "$FINAL"

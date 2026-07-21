@@ -1,0 +1,120 @@
+#!/bin/bash
+# node-exporter textfile collector: ZFS pool + ARC health (WS5 Phase 5b, C.1-C.3).
+# Rendered by roles/node_exporter_textfile onto hme-srv-01. Writes *.prom to the
+# node-exporter textfile dir; the node-exporter DaemonSet scrapes it read-only.
+#
+# Emitted metrics:
+#   node_zfs_pool_health{pool}             0=ONLINE 1=DEGRADED 2=FAULTED/SUSPENDED/UNAVAIL 3=other
+#   node_zfs_pool_scrub_in_progress{pool}  1 if a scrub is running, 0 otherwise
+#   node_zfs_pool_scrub_days_since{pool}   days since last scrub started (3650 sentinel if never)
+#   node_zfs_pool_scrub_errors{pool}       errors from the last/active scrub
+#   node_zfs_pool_data_errors{pool}        "errors:" line count (nonzero = page)
+#   node_zfs_arc_size_bytes                current ARC size
+#   node_zfs_arc_max_bytes                 ARC max (c_max)
+#
+# Note: node-exporter's built-in ZFS collector already exposes node_zfs_zpool_state
+# and a rich node_zfs_arc_* set on this host; the metrics above are unique names
+# (no collision) and add the scrub/data-error signals the built-in lacks.
+#
+# Atomic write: build in a tmp file, mv into place so node-exporter never reads
+# a half-written file.
+set -u
+
+OUT_DIR="{{ node_textfile_dir }}"
+TMP="${OUT_DIR}/.zfs.prom.$$"
+FINAL="${OUT_DIR}/zfs.prom"
+
+# Pools to report: rendered list, or discover all imported pools if empty.
+# (Plain string + word-split loop, not a bash array: the bash array-length
+#  idiom collides with Jinja2's comment-open delimiter during templating.)
+POOLS="{{ node_textfile_zfs_pools | join(' ') }}"
+if [ -z "$POOLS" ]; then
+  POOLS=$(zpool list -H -o name 2>/dev/null | tr '\n' ' ')
+fi
+
+{
+  echo "# HELP node_zfs_pool_health ZFS pool health state (0=ONLINE,1=DEGRADED,2=FAULTED,3=other)"
+  echo "# TYPE node_zfs_pool_health gauge"
+  echo "# HELP node_zfs_pool_scrub_in_progress 1 if a scrub is currently running, 0 otherwise"
+  echo "# TYPE node_zfs_pool_scrub_in_progress gauge"
+  echo "# HELP node_zfs_pool_scrub_days_since days since the last scrub started (3650 sentinel if never)"
+  echo "# TYPE node_zfs_pool_scrub_days_since gauge"
+  echo "# HELP node_zfs_pool_scrub_errors errors reported by the last/active scrub"
+  echo "# TYPE node_zfs_pool_scrub_errors gauge"
+  echo "# HELP node_zfs_pool_data_errors nonzero data-error count from zpool status (page on any)"
+  echo "# TYPE node_zfs_pool_data_errors gauge"
+
+  for pool in $POOLS; do
+    [ -n "$pool" ] || continue
+
+    # --- health ---
+    health=$(zpool list -H -o health "$pool" 2>/dev/null | tr -d ' ')
+    case "$health" in
+      ONLINE)    h=0 ;;
+      DEGRADED)  h=1 ;;
+      FAULTED|SUSPENDED|UNAVAIL) h=2 ;;
+      *)         h=3 ;;
+    esac
+    echo "node_zfs_pool_health{pool=\"$pool\"} $h"
+
+    # --- scan (scrub) section: parse date + errors ---
+    status=$(zpool status "$pool" 2>/dev/null)
+    scrub_date=""
+    scrub_errs=0
+    # Completed:  "scan: scrub repaired 0B in 00:24:35 with 0 errors on Sun Jul 14 12:00:35 2025"
+    # In progress: "scan: scrub in progress since Sun Jul 20 12:00:00 2025"
+    # Resilver:    "scan: resilvered ..."  (treated as a scan event; date from "since/on")
+    scan_line=$(printf '%s\n' "$status" | awk '/scan:/{f=1} f{print} /config:/{exit}')
+    if [ -n "$scan_line" ]; then
+      # in progress?  "scan: scrub in progress since <date>"
+      if printf '%s\n' "$scan_line" | grep -qi 'in progress'; then
+        ip=1
+      else
+        ip=0
+      fi
+      # errors: "with N errors" (completed) or "N errors" patterns
+      errs=$(printf '%s\n' "$scan_line" | grep -oE 'with [0-9]+ errors|[0-9]+ errors' | grep -oE '[0-9]+' | head -1)
+      scrub_errs="${errs:-0}"
+      # date: "on <Dow Mon DD HH:MM:SS YYYY>" (completed) or "since <Dow ...>" (in progress)
+      scrub_date=$(printf '%s\n' "$scan_line" | grep -oE '(Sun|Mon|Tue|Wed|Thu|Fri|Sat) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) +[0-9]+ [0-9:]+ [0-9]+' | tail -1)
+    else
+      ip=0
+    fi
+    echo "node_zfs_pool_scrub_in_progress{pool=\"$pool\"} ${ip}"
+    if [ -n "$scrub_date" ]; then
+      secs=$(date -d "$scrub_date" +%s 2>/dev/null || echo 0)
+      now=$(date +%s)
+      if [ "$secs" -gt 0 ]; then
+        days=$(awk -v s="$secs" -v n="$now" 'BEGIN{printf "%.2f", (n-s)/86400}')
+      else
+        days=3650
+      fi
+    else
+      # Never scrubbed (no scan line) -> sentinel so the >30d overdue alert fires.
+      days=3650
+    fi
+    echo "node_zfs_pool_scrub_days_since{pool=\"$pool\"} ${days}"
+    echo "node_zfs_pool_scrub_errors{pool=\"$pool\"} $scrub_errs"
+
+    # --- data errors: the "errors:" line ---
+    err_line=$(printf '%s\n' "$status" | awk '/^[[:space:]]*errors:/{print; exit}')
+    case "$err_line" in
+      *"No known data errors"*) de=0 ;;
+      "") de=0 ;;
+      *) de=$(printf '%s\n' "$err_line" | grep -oE '[0-9]+' | head -1); de="${de:-1}" ;;
+    esac
+    echo "node_zfs_pool_data_errors{pool=\"$pool\"} $de"
+  done
+
+  # --- ARC (hme-srv-01 only; harmless if the kstat file is absent) ---
+  arc=/proc/spl/kstat/zfs/arcstats
+  if [ -r "$arc" ]; then
+    arc_size=$(awk '$1=="size"{print $3}' "$arc" 2>/dev/null)
+    arc_max=$(awk '$1=="c_max"{print $3}' "$arc" 2>/dev/null)
+    [ -n "$arc_size" ] && echo "node_zfs_arc_size_bytes ${arc_size:-0}"
+    [ -n "$arc_max" ]  && echo "node_zfs_arc_max_bytes ${arc_max:-0}"
+  fi
+} > "$TMP"
+
+mv -f "$TMP" "$FINAL"
+chmod 0644 "$FINAL"
