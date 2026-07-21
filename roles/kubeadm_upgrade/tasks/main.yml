@@ -1,0 +1,192 @@
+---
+# Role: kubeadm_upgrade
+# Upgrades the cluster exactly ONE minor version (e.g. 1.29 -> 1.30). Run once
+# per hop with `-e k8s_target_minor=1.30` (then 1.31, 1.32, ... 1.36).
+#
+# Design notes:
+#   * Parameterised by the TARGET MINOR only (`k8s_target_minor`). The exact
+#     patch + Debian build suffix is NOT hardcoded: we point apt at the
+#     pkgs.k8s.io channel for the target minor, install kubeadm UNPINNED (apt
+#     picks the latest patch in that channel), then read the installed version
+#     back. That sidesteps the pkgs.k8s.io build-suffix drift (most channels use
+#     `-1.1`, but e.g. v1.36.2 ships as `-2.1`).
+#   * The existing nodes already use the pkgs.k8s.io repo (verified), so we
+#     just rewrite /etc/apt/sources.list.d/kubernetes.list to the target
+#     channel. The signing key is shared across all pkgs.k8s.io stable
+#     channels, so the keyring already on the nodes is reused.
+#   * kubelet/kubeadm/kubectl may be `hold`-ed on some nodes (rp5-0,
+#     hme-srv-01) and not others — we unhold before installing (idempotent).
+#   * The role branches by group membership: control-plane nodes run
+#     `kubeadm upgrade apply`, workers run `kubeadm upgrade node` (drained
+#     first, uncordoned after). Draining/uncordoning delegates kubectl to the
+#     control plane (rp5-0) using its admin.conf.
+#
+# Usage:
+#   ansible-playbook -i inventory/ playbooks/upgrade_k8s.yml -e "k8s_target_minor=1.30"
+
+# ── INSURANCE: pin API hostname so kubelet never depends on DNS ─────
+# Runs first on every node (idempotent). Matches the existing cluster
+# convention (hme-srv-01 already has this entry) and prevents the
+# systemd-resolved-preferences-1.1.1.1 flake from breaking kubelet mid-upgrade.
+- name: Pin k8s API hostname in /etc/hosts
+  lineinfile:
+    path: /etc/hosts
+    regexp: "{{ k8s_api_hostname }}$"
+    line: "{{ k8s_api_ip }} {{ k8s_api_hostname }}"
+    state: present
+
+# ── WORKER: cordon (always), then optionally drain (evict) ─────────
+# Cordoning ALWAYS runs on workers so no new pods schedule during the kubelet
+# restart, even when we are NOT evicting. The evict-drain below is gated by
+# `drain_nodes` because this cluster's PDBs pin single-replica stateful
+# workloads (Longhorn instance-manager per storage node, loki-write, vault,
+# istiod) to allowedDisruptions=0, making `kubectl drain` fail on every
+# worker. For kubelet-only minor hops we upgrade in place: cordon → upgrade →
+# uncordon, with running pods kept live by containerd across the kubelet
+# restart (no eviction, no PDB conflict, no stateful-workload downtime).
+# `kubeadm upgrade node` does not require a drain. Set `drain_nodes: true` only
+# if the PDBs have been temporarily patched to allow disruption.
+- name: Cordon worker {{ inventory_hostname }}
+  delegate_to: rp5-0
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  command: "kubectl cordon {{ inventory_hostname }}"
+  when: inventory_hostname in groups['k8s_workers']
+  changed_when: true
+  # Tolerate the brief window after `kubeadm upgrade apply` where the apiserver
+  # static pod has just restarted and RBAC is not yet serving (returns Forbidden
+  # for ~10-20s). Re-trying avoids a spurious failure on the first worker.
+  retries: 6
+  delay: 10
+
+- name: Drain worker {{ inventory_hostname }} (evict pods; gated by drain_nodes)
+  delegate_to: rp5-0
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  command: >
+    kubectl drain {{ inventory_hostname }}
+    --ignore-daemonsets --delete-emptydir-data --timeout=120s
+  when:
+    - inventory_hostname in groups['k8s_workers']
+    - drain_nodes | bool
+  changed_when: true
+
+# ── SHARED: repoint apt to the target-minor channel ────────────────
+- name: Ensure apt keyrings directory
+  file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+- name: Refresh pkgs.k8s.io signing key (keys rotate and expire — always re-fetch)
+  shell: |
+    curl -fsSL https://pkgs.k8s.io/core:/stable:/v{{ k8s_target_minor }}/deb/Release.key \
+      | gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+- name: Repoint k8s apt repo to v{{ k8s_target_minor }} channel
+  copy:
+    dest: /etc/apt/sources.list.d/kubernetes.list
+    content: |
+      deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{ k8s_target_minor }}/deb/ /
+    mode: "0644"
+
+# Tolerant of unrelated broken third-party apt repos (e.g. the pre-existing
+# Helm baltocdn repo on rp5-0, which returns a junk page). We only fail if the
+# k8s repo itself didn't update — `packages.k8s.io` appears in apt's Get lines.
+- name: Update apt package index (tolerant of unrelated broken repos)
+  shell: apt-get update
+  register: apt_update
+  changed_when: "'Get:' in apt_update.stdout"
+  failed_when: "'packages.k8s.io' not in apt_update.stdout"
+
+- name: Unhold k8s packages (no-op if not held)
+  dpkg_selections:
+    name: "{{ item }}"
+    selection: install
+  loop:
+    - kubelet
+    - kubeadm
+    - kubectl
+
+- name: Install kubeadm (latest patch in v{{ k8s_target_minor }} channel, unpinned)
+  apt:
+    name: kubeadm
+    state: latest
+
+- name: Read installed kubeadm version (semver, for `kubeadm upgrade apply`)
+  command: kubeadm version -o short
+  register: kubeadm_ver_raw
+  changed_when: false
+
+- name: Set kubeadm_semver (strip leading v)
+  set_fact:
+    kubeadm_semver: "{{ kubeadm_ver_raw.stdout | regex_replace('^v', '') }}"
+
+- name: Read installed kubeadm Debian version (for pinning kubelet/kubectl)
+  command: dpkg-query -W -f='${Version}' kubeadm
+  register: kubeadm_debver_raw
+  changed_when: false
+
+- name: Set kubeadm_debver
+  set_fact:
+    kubeadm_debver: "{{ kubeadm_debver_raw.stdout }}"
+
+- name: Show resolved versions
+  debug:
+    msg: "target minor={{ k8s_target_minor }} kubeadm_semver={{ kubeadm_semver }} debver={{ kubeadm_debver }}"
+
+# ── CONTROL PLANE: kubeadm upgrade apply ───────────────────────────
+# --ignore-preflight-errors=CreateJob: kubeadm's preflight creates a health-check
+# Job that must Complete within 15s. A cold pull of the agnhost image (~10s on
+# nodes without it cached) blows that budget and fails the check even though the
+# cluster is healthy (verified independently via kubectl after each hop). This is
+# the standard workaround for that flaky check.
+- name: Apply upgrade plan on control plane (kubeadm upgrade apply)
+  command: "kubeadm upgrade apply {{ kubeadm_semver }} -y --ignore-preflight-errors=CreateJob"
+  timeout: "{{ kubeadm_upgrade_timeout }}"
+  when: inventory_hostname in groups['k8s_control_plane']
+
+# ── WORKER: kubeadm upgrade node ───────────────────────────────────
+- name: Upgrade worker node config (kubeadm upgrade node)
+  command: kubeadm upgrade node
+  when: inventory_hostname in groups['k8s_workers']
+
+# ── SHARED: upgrade kubelet + kubectl to match kubeadm ──────────────
+- name: Upgrade kubelet and kubectl to {{ kubeadm_debver }}
+  apt:
+    name:
+      - "kubelet={{ kubeadm_debver }}"
+      - "kubectl={{ kubeadm_debver }}"
+    state: present
+
+- name: Restart kubelet
+  systemd:
+    name: kubelet
+    state: restarted
+    daemon_reload: yes
+
+- name: Hold k8s packages at the new version
+  dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop:
+    - kubelet
+    - kubeadm
+    - kubectl
+
+# ── WORKER: uncordon + wait for Ready ──────────────────────────────
+- name: Uncordon worker {{ inventory_hostname }}
+  delegate_to: rp5-0
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  command: "kubectl uncordon {{ inventory_hostname }}"
+  when: inventory_hostname in groups['k8s_workers']
+  changed_when: true
+
+- name: Wait for worker {{ inventory_hostname }} to be Ready
+  delegate_to: rp5-0
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  command: "kubectl wait --for=condition=Ready node/{{ inventory_hostname }} --timeout=180s"
+  when: inventory_hostname in groups['k8s_workers']
+  changed_when: false

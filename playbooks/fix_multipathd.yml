@@ -1,0 +1,5 @@
+---
+# Blacklist Longhorn devices in multipathd on hme-srv-01
+- hosts: hme-srv-01
+  roles:
+    - multipathd_blacklist

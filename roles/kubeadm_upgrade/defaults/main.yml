@@ -1,0 +1,27 @@
+---
+# Role: kubeadm_upgrade — defaults
+# Upgrades the cluster ONE minor at a time. Override k8s_target_minor per hop:
+#   -e "k8s_target_minor=1.32"
+
+k8s_target_minor: "1.30"   # target minor version (no patch; apt picks latest in channel)
+
+# Evict-drain worker nodes before upgrading them.
+#
+# DEFAULT IS FALSE for this cluster: PDBs pin single-replica stateful workloads
+# (Longhorn instance-manager per storage node, loki-write, vault, istiod) to
+# allowedDisruptions=0, so `kubectl drain --ignore-daemonsets --delete-emptydir-data`
+# fails on every worker. With drain_nodes=false the role does cordon ->
+# upgrade-in-place -> uncordon: running pods stay live across the kubelet
+# restart (containerd holds them), no eviction, no PDB conflict, no
+# stateful-workload downtime. `kubeadm upgrade node` does not require a drain.
+#
+# Set drain_nodes=true ONLY if you have temporarily patched those PDBs to allow
+# disruption (which causes brief downtime + Longhorn instance-manager migration
+# per node). The cordon task always runs regardless (protects from new pods
+# scheduling during the kubelet restart).
+#
+# See playbooks/upgrade_k8s.yml header for the full hop procedure & lessons.
+drain_nodes: false
+
+# Timeout for `kubeadm upgrade apply` (seconds).
+kubeadm_upgrade_timeout: 600

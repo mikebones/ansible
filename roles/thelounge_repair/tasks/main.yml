@@ -1,0 +1,20 @@
+---
+# Role: thelounge_repair
+# Triggers replica rebuild for the degraded thelounge volume via Longhorn API
+
+- name: Trigger thelounge volume replica rebuild
+  uri:
+    url: "{{ longhorn_api }}/v1/volumes/pvc-2b317254"
+    method: PATCH
+    body:
+      numberOfReplicas: 2
+    body_format: json
+    headers:
+      Content-Type: application/json
+    return_content: yes
+  delegate_to: localhost
+  register: repair_result
+
+- name: Show repair result
+  debug:
+    msg: "thelounge volume update: {{ repair_result.json.state }} / {{ repair_result.json.robustness }}"

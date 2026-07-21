@@ -1,0 +1,41 @@
+---
+# ZFS snapshotting + dataset tuning for hme-srv-01 (roles: zfs, sanoid).
+#
+# Run from WSL (the repo lives at /mnt/c/Users/Mike-/git/ansible, which is
+# world-writable so ansible.cfg is ignored — set paths via env vars):
+#
+# 1. Render + review ONLY (applies nothing live; writes sanoid.conf.pending):
+#      wsl bash -lc 'cd /mnt/c/Users/Mike-/git/ansible && \
+#        ANSIBLE_ROLES_PATH=roles ANSIBLE_INVENTORY=inventory \
+#        ANSIBLE_HOST_KEY_CHECKING=False \
+#        ansible-playbook playbooks/snapshot_setup.yml'
+#      then: ssh administrator@192.168.1.231 'sudo cat /etc/sanoid/sanoid.conf.pending'
+#
+# 2. Apply zfs-set dataset tuning + zfs_recover persistence (idempotent, low-risk;
+#    recordsize is new-writes-only):
+#      ... ansible-playbook playbooks/snapshot_setup.yml --tags zfs
+#
+# 3. ACTIVATE sanoid live snapshots (enables sanoid.timer — first snapshots in
+#    ~15 min). Review the .pending config from step 1 first:
+#      ... ansible-playbook playbooks/snapshot_setup.yml -e sanoid_apply=true
+#
+# WEDGE-SAFETY (this pool imported only with zfs_recover=1 after the
+# 2026-07-20 spacemap corruption — see docs/incident-2026-07-20-...md):
+#   - Snapshot PRUNING is a per-snapshot `zfs destroy` with NO livelists, so it
+#     does NOT carry the allocator-wedge risk of the clone-tree destroy.
+#   - Still, MONITOR the FIRST prune cycle (once snapshots age past retention,
+#     ~24h for the first daily): watch `zpool status data` (not degraded),
+#     txg advancing (`tail /proc/spl/kstat/zfs/data/txgs`), and no D-state zfs
+#     threads (`ps -eo stat,comm | grep -E 'z_|txg_sync'`). If any allocator
+#     stress appears: `systemctl stop sanoid.timer` and reassess.
+#   - A scrub (#46, ~7d) is running concurrently — read-only, no conflict with
+#     snapshot creation.
+
+- name: ZFS snapshotting + dataset tuning for hme-srv-01
+  hosts: hme-srv-01
+  become: yes
+  roles:
+    - role: zfs
+      tags: [zfs, tuning]
+    - role: sanoid
+      tags: [sanoid, snapshots]

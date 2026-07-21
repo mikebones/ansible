@@ -1,0 +1,42 @@
+---
+# Role: multipathd_blacklist
+# Blacklists Longhorn devices in multipathd on hme-srv-01
+
+- name: Check if multipath.conf exists
+  stat:
+    path: /etc/multipath.conf
+  register: multipath_conf
+
+- name: Add blacklist for Longhorn devices
+  blockinfile:
+    path: /etc/multipath.conf
+    block: |
+      blacklist {
+          devnode "^sd.*"
+          devnode "^vd.*"
+      }
+    marker: "# {mark} ANSIBLE LONGHORN BLACKLIST"
+  become: yes
+  when: multipath_conf.stat.exists
+
+- name: Create multipath.conf with blacklist if missing
+  copy:
+    dest: /etc/multipath.conf
+    content: |
+      defaults {
+          find_multipaths yes
+          user_friendly_names yes
+      }
+
+      blacklist {
+          devnode "^sd.*"
+          devnode "^vd.*"
+      }
+  become: yes
+  when: not multipath_conf.stat.exists
+
+- name: Restart multipathd
+  service:
+    name: multipathd
+    state: restarted
+  become: yes

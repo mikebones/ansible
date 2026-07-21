@@ -1,0 +1,56 @@
+---
+# host_vars/hme-srv-01.yml
+# hme-srv-01 is the storage node (ZFS `data` pool + NFS). On 2026-07-19 its
+# containerd snapshotter was migrated zfs -> overlayfs onto a dedicated 50G
+# ext4 LV (ubuntu-vg/containerd_lv) carved from the reclaimed L2ARC LV.
+#
+# Pin it here so a plain `ansible-playbook playbooks/tune_storage.yml --tags
+# containerd` (no -e) renders the overlayfs config that matches live state,
+# rather than reverting to the role default (zfs). The migration itself is
+# gated by containerd_perform_migration (default false) so a normal run only
+# renders config to /etc/containerd/config.toml.pending for review.
+#
+# Live state (verify with: crictl info | grep snapshotter -> "overlayfs"):
+#   - /dev/ubuntu-vg/containerd_lv  ext4  mounted at /var/lib/containerd (fstab)
+#   - /etc/containerd/config.toml   snapshotter = overlayfs (backup: .zfs.bak)
+#   - data/containerd zfs dataset   destroyed (reclaimed ~10G + removed the
+#     per-snapshot dataset sprawl that was churning ARC + serializing
+#     CreateContainer under load -> the CreateContainerError loops).
+containerd_snapshotter: overlayfs
+
+# --- ZFS dataset tuning + zfs_recover persistence (roles/zfs) ---------------
+# The data pool imports ONLY with zfs_recover=1 (spacemap corruption
+# 2026-07-20). Pin it true so roles/zfs keeps the modprobe.d line durable
+# across future module reloads / rebuilds. See
+# docs/incident-2026-07-20-hme-srv-01-zfs-destroy-wedge.md.
+zfs_recover_enabled: true
+
+# Apply per-dataset recordsize/atime/xattr (idempotent; mirrors live state set
+# during WS1 + adds plex-config recordsize=16K). recordsize is new-writes-only.
+zfs_tuning_enabled: true
+zfs_datasets:
+  data:             { atime: off, xattr: sa, relatime: on }
+  data/complete:    { recordsize: 1M, atime: off, xattr: sa }
+  data/plex-config: { recordsize: 16K, atime: off, xattr: sa }
+  data/home:        { atime: off, xattr: sa }
+
+# --- Sanoid snapshot policy (roles/sanoid) ----------------------------------
+# Local point-in-time snapshots. sanoid_apply=false by default: a plain run
+# renders sanoid.conf.pending for review; pass -e sanoid_apply=true to activate
+# the timer. Retention per dataset (media daily=2 = ~48h pin per user choice):
+#   data/plex-config  plex   frequently=8 hourly=24 daily=7 weekly=4 monthly=3
+#   data/home         home   daily=7 weekly=4 monthly=3
+#   data/complete     media  daily=2  (bounded pin on 85%-full pool)
+#   data/watch        watch  daily=7
+#   data/incomplete   (none — high churn, would pin huge blocks)
+sanoid_apply: false
+sanoid_datasets:
+  - { name: data/plex-config, template: plex }
+  - { name: data/home,        template: home }
+  - { name: data/complete,    template: media }
+  - { name: data/watch,       template: watch }
+sanoid_templates:
+  plex:  { frequently: 8, hourly: 24, daily: 7, weekly: 4, monthly: 3, yearly: 0 }
+  home:  { hourly: 0, daily: 7, weekly: 4, monthly: 3 }
+  media: { hourly: 0, daily: 2, weekly: 0, monthly: 0 }
+  watch: { daily: 7 }

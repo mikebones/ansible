@@ -1,0 +1,86 @@
+---
+# playbooks/join_nodes.yml
+# Install kubeadm on the two new worker nodes (hme-srv-02, hme-srv-03) and join
+# them to the existing v1.29.7 cluster as workers.
+#
+# Play 1 generates the kubeadm join command with kubectl ON THE CONTROL MACHINE
+# (localhost): creates a short-lived bootstrap token and derives the discovery
+# CA-cert hash from the public cluster-info ConfigMap. No SSH to the existing
+# control plane is required.
+#
+# Play 2 runs the kubeadm_install role on the new workers (serial:1) which
+# installs containerd + kubelet/kubeadm/kubectl and runs the join command.
+
+- name: Generate kubeadm join command
+  hosts: localhost
+  gather_facts: no
+  vars:
+    k8s_control_plane_endpoint: "k8s.costascomputers.com:6443"
+  environment:
+    # kubectl is a snap on this control node; /snap/bin isn't in ansible's
+    # non-interactive localhost shell PATH.
+    PATH: "/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  tasks:
+    - name: Generate bootstrap token id (6 hex chars)
+      command: openssl rand -hex 3
+      register: token_id_cmd
+      changed_when: false
+
+    - name: Generate bootstrap token secret (16 hex chars)
+      command: openssl rand -hex 8
+      register: token_secret_cmd
+      changed_when: false
+
+    - name: Set token facts
+      set_fact:
+        token_id: "{{ token_id_cmd.stdout }}"
+        token_secret: "{{ token_secret_cmd.stdout }}"
+
+    - name: Create bootstrap token Secret in kube-system
+      shell: |
+        cat <<EOF | kubectl apply -f -
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: bootstrap-token-{{ token_id }}
+          namespace: kube-system
+        type: bootstrap.kubernetes.io/token
+        stringData:
+          description: "ansible join token"
+          token-id: "{{ token_id }}"
+          token-secret: "{{ token_secret }}"
+          usage-bootstrap-authentication: "true"
+          usage-bootstrap-signing: "true"
+          auth-extra-groups: "system:bootstrappers:kubeadm:default-node-token"
+        EOF
+
+    - name: Compute discovery CA-cert hash from cluster-info
+      shell: |
+        kubectl get cm cluster-info -n kube-public -o jsonpath='{.data.kubeconfig}' \
+          | grep 'certificate-authority-data:' | awk '{print $2}' | tr -d '\r\n' \
+          | base64 -d \
+          | openssl x509 -pubkey -noout 2>/dev/null \
+          | openssl pkey -pubin -outform der 2>/dev/null \
+          | openssl dgst -sha256 -hex | grep -oE '[0-9a-f]{64}' | head -1
+      register: ca_hash
+      changed_when: false
+      failed_when: ca_hash.stdout | length != 64
+
+    - name: Assemble kubeadm join command
+      set_fact:
+        kubeadm_join_cmd: >-
+          kubeadm join {{ k8s_control_plane_endpoint }}
+          --token {{ token_id }}.{{ token_secret }}
+          --discovery-token-ca-cert-hash sha256:{{ ca_hash.stdout }}
+        cacheable: yes
+
+    - name: Show the join command
+      debug:
+        var: kubeadm_join_cmd
+
+- name: Install kubeadm and join the new workers
+  hosts: new_workers
+  become: yes
+  serial: 1
+  roles:
+    - kubeadm_install

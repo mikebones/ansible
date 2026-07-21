@@ -1,0 +1,31 @@
+---
+# Role: longhorn_disk_reservation
+# Reduces disk reserved storage on rp5-2 and rp5-3 to clear DiskPressure
+
+- name: Get current node disk info from Longhorn API
+  uri:
+    url: "{{ longhorn_api }}/v1/nodes/{{ inventory_hostname }}"
+    method: GET
+    return_content: yes
+  register: node_info
+
+- name: Extract disk ID
+  set_fact:
+    disk_id: "{{ item.key }}"
+  loop: "{{ node_info.json.disks | dict2items }}"
+  when: item.value.path == "/var/lib/longhorn/"
+
+- name: Reduce storage reserved to {{ longhorn_disk_reserved_percent }}%
+  uri:
+    url: "{{ longhorn_api }}/v1/nodes/{{ inventory_hostname }}"
+    method: PATCH
+    body:
+      disks:
+        "{{ disk_id }}":
+          path: "/var/lib/longhorn/"
+          storageReserved: "{{ longhorn_disk_reserved_bytes }}"
+    body_format: json
+    headers:
+      Content-Type: application/json
+  delegate_to: localhost
+  when: disk_id is defined

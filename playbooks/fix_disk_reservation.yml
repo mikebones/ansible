@@ -1,0 +1,7 @@
+---
+# Fix disk pressure on rp5-2 and rp5-3 by reducing storage reservation
+# from 30% to 20% (196.5 GB) to increase the provisionable limit above
+# current scheduled storage.
+- hosts: rp5-2:rp5-3
+  roles:
+    - longhorn_disk_reservation

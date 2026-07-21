@@ -1,0 +1,74 @@
+# Original kubeadm init configuration — historical record
+#
+# Recovered 2026-07-20 from /data/kube/kubeadm-config.yaml on hme-srv-01
+# (a leftover working-dir copy from when the cluster was first initialized,
+# ca. 2020). The live cluster config now lives in the `kubeadm-config`
+# ConfigMap in kube-system and /etc/kubernetes/ on the control plane; this
+# file is preserved only as the original bootstrap record.
+#
+# Cluster was since upgraded 1.29 -> 1.36 (task #12). The bootstrap tokens
+# below are from the original init and are long expired/rotated — kept here
+# verbatim for fidelity, NOT for reuse.
+#
+# Two variants were found in /data/kube:
+#   - kubeadm-config.yaml     (older: token qn2cjj..., no nftables fields)
+#   - kubeadm-config.yaml.bak (newer: token zjp1ro..., adds NFTablesProxyMode
+#                              + mode: nftables + featureGates)
+# Both are included below. After recording, /data/kube was cleaned up
+# (publiccert.crt was 0 bytes / empty).
+
+# ---------------------------------------------------------------------------
+# kubeadm-config.yaml  (primary, older)
+# ---------------------------------------------------------------------------
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: InitConfiguration
+bootstrapTokens:
+  - token: "qn2cjj.lly44dp9i6jr35zc"
+    description: "kubeadm bootstrap token"
+---
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: ClusterConfiguration
+controlPlaneEndpoint: "k8s.costascomputers.com"
+networking:
+  serviceSubnet: "10.96.0.0/16"
+  podSubnet: "10.244.0.0/24"
+  dnsDomain: "cluster.local"
+clusterName: "kubernetes"
+apiserver:
+  extraArgs:
+    secure-port: "443"
+controllerManager:
+  extraArgs:
+    allocate-node-cidrs: true
+    cluster-cidr: "10.0.0.0/8"
+---
+apiVersion: kubeproxy.config.k8s.io/v1alpha1
+kind: KubeProxyConfiguration
+clusterCIDR: "10.0.0.0/8"
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+clusterDNS:
+  - "10.96.0.10"
+resolvConf: "/run/systemd/resolve/resolv.conf"
+podCIDR: "10.244.0.0/24"
+podCIDRs: "10.244.0.0/24"
+---
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: JoinConfiguration
+discovery:
+  bootstrapToken:
+    token: "qn2cjj.lly44dp9i6jr35zc"
+    unsafeSkipCAVerification: true
+    apiServerEndpoint: "k8s.costascomputers.com:6443"
+
+# ---------------------------------------------------------------------------
+# kubeadm-config.yaml.bak  (newer variant — diff vs primary)
+#   token changed to zjp1ro.pdzh85s9f41kzijm
+#   allocate-node-cidrs: "true" (quoted)
+#   adds: controllerManager.extraArgs.feature-gates: NFTablesProxyMode=true
+#   adds: kubeProxy mode: "nftables" + featureGates.NFTablesProxyMode: true
+#   KubeletConfiguration: drops resolvConf line, moves podCIDR below podCIDRs
+# ---------------------------------------------------------------------------
+# (Full .bak content is the primary config with the substitutions above; see
+#  `diff kubeadm-config.yaml kubeadm-config.yaml.bak` captured 2026-07-20.)

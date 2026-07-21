@@ -1,0 +1,10 @@
+---
+# Role: cryptsetup
+# Installs cryptsetup package on rp5 nodes
+
+- name: Install cryptsetup
+  apt:
+    name: cryptsetup
+    state: present
+    update_cache: yes
+  become: yes

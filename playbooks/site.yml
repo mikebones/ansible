@@ -1,0 +1,21 @@
+---
+# Main playbook — runs all Longhorn cluster fixes
+# Usage: ansible-playbook -i inventory/ playbooks/site.yml
+
+- name: Fix disk pressure on rp5-2 and rp5-3
+  import_playbook: fix_disk_reservation.yml
+
+- name: Install cryptsetup on rp5 nodes
+  import_playbook: install_cryptsetup.yml
+
+- name: Load dm_crypt kernel module on all nodes
+  import_playbook: load_dm_crypt.yml
+
+- name: Blacklist multipathd on hme-srv-01
+  import_playbook: fix_multipathd.yml
+
+- name: Repair degraded thelounge volume
+  import_playbook: repair_thelounge.yml
+
+# Kubernetes upgrade — run SEPARATELY, one minor version at a time
+# See: playbooks/upgrade_k8s.yml

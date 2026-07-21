@@ -1,0 +1,148 @@
+---
+# Role: zfs — cap the ZFS ARC to pct% of total RAM, but never below the
+# current ARC *metadata* floor (+ buffer). See defaults/main.yml for why the
+# metadata-floor check matters (perpetual arc_prune thrash otherwise).
+
+- name: Assert ZFS is present
+  command: which zpool
+  register: zfs_which
+  changed_when: false
+  failed_when: zfs_which.rc != 0
+
+- name: Assert ARC stats kstat is readable (ZFS module loaded)
+  command: test -r "{{ zfs_arcstats_path }}"
+  register: zfs_arcstats_check
+  changed_when: false
+  failed_when: zfs_arcstats_check.rc != 0
+
+- name: Read total RAM (kB)
+  command: awk '/^MemTotal:/{print $2}' /proc/meminfo
+  register: zfs_memtotal_kb
+  changed_when: false
+
+- name: Read current ARC metadata size (bytes)
+  shell: awk '/^arc_meta_used /{print $3}' "{{ zfs_arcstats_path }}"
+  register: zfs_arc_meta_raw
+  changed_when: false
+
+- name: Read current ARC total size + existing cap (bytes)
+  shell: |
+    awk '/^size /{print "size="$3}
+         /^c_max /{print "cmax="$3}' "{{ zfs_arcstats_path }}"
+  register: zfs_arc_now_raw
+  changed_when: false
+
+- name: Parse RAM + ARC figures
+  set_fact:
+    zfs_total_ram_bytes: "{{ (zfs_memtotal_kb.stdout | trim | int) * 1024 }}"
+    zfs_arc_meta_bytes: "{{ zfs_arc_meta_raw.stdout | trim | int }}"
+    zfs_arc_size_bytes: "{{ (zfs_arc_now_raw.stdout | regex_search('size=([0-9]+)', '\\1') | first | int) }}"
+    zfs_arc_cmax_bytes: "{{ (zfs_arc_now_raw.stdout | regex_search('cmax=([0-9]+)', '\\1') | first | int) }}"
+
+- name: Compute target cap (pct of RAM)
+  set_fact:
+    zfs_arc_target_bytes: "{{ ((zfs_total_ram_bytes | int) * (zfs_arc_pct | int) // 100) | int }}"
+
+- name: Compute metadata floor (arc_meta + buffer)
+  set_fact:
+    zfs_arc_floor_bytes: "{{ (zfs_arc_meta_bytes | int) + (zfs_arc_meta_buffer_bytes | int) }}"
+
+- name: Compute final cap = max(target, floor, hard min)
+  set_fact:
+    zfs_arc_cap_bytes: "{{ [ (zfs_arc_target_bytes | int), (zfs_arc_floor_bytes | int), (zfs_arc_min_bytes | int) ] | max }}"
+
+- name: WARN if requested pct is below the metadata floor (role raised the cap)
+  debug:
+    msg: >-
+      zfs_arc_pct={{ zfs_arc_pct }}% of RAM = {{ zfs_arc_target_bytes }} B is BELOW the ARC metadata
+      floor {{ zfs_arc_floor_bytes }} B (arc_meta={{ zfs_arc_meta_bytes }} B + buffer
+      {{ zfs_arc_meta_buffer_bytes }}). Cap raised to {{ zfs_arc_cap_bytes }} B to avoid
+      perpetual arc_prune thrash. Lower the floor by reducing ZFS dataset count (e.g. move
+      containerd off the zfs snapshotter, prune unused Longhorn volumes), then re-run.
+  when: (zfs_arc_target_bytes | int) < (zfs_arc_floor_bytes | int)
+
+- name: Show resolved ARC sizing
+  debug:
+    msg: >-
+      RAM={{ zfs_total_ram_bytes }} B  pct={{ zfs_arc_pct }}%  target={{ zfs_arc_target_bytes }} B
+      arc_meta={{ zfs_arc_meta_bytes }} B  floor(+{{ zfs_arc_meta_buffer_bytes }})={{ zfs_arc_floor_bytes }} B
+      current_size={{ zfs_arc_size_bytes }} B  current_cmax={{ zfs_arc_cmax_bytes }} B
+      -> cap={{ zfs_arc_cap_bytes }} B ({{ (zfs_arc_cap_bytes | int) | human_readable }})
+
+# --- Apply live -----------------------------------------------------------
+- name: Apply ARC cap live (sysfs) when enabled
+  shell: "echo {{ zfs_arc_cap_bytes }} > {{ zfs_arc_sysfs }}"
+  when: zfs_arc_enabled | bool
+  changed_when: false
+
+# --- Persist --------------------------------------------------------------
+- name: Persist ARC cap in {{ zfs_arc_persist_file }} (idempotent; preserves other options)
+  lineinfile:
+    path: "{{ zfs_arc_persist_file }}"
+    create: true
+    mode: "0644"
+    regexp: '^options zfs zfs_arc_max='
+    line: "options zfs zfs_arc_max={{ zfs_arc_cap_bytes }}"
+    state: present
+  when: zfs_arc_enabled | bool
+  register: zfs_arc_persist
+
+- name: Confirm applied cap (re-read)
+  shell: "cat {{ zfs_arc_sysfs }}"
+  register: zfs_arc_applied
+  changed_when: false
+  when: zfs_arc_enabled | bool
+
+- name: Report applied cap
+  debug:
+    msg: >-
+      zfs_arc_max applied={{ zfs_arc_applied.stdout | trim }} B  expected={{ zfs_arc_cap_bytes }} B
+      persisted={{ zfs_arc_persist.changed | default(false) }}
+  when: zfs_arc_enabled | bool
+
+# --- zfs_recover persistence ------------------------------------------------
+# hme-srv-01's data pool imports ONLY with zfs_recover=1 (spacemap corruption
+# 2026-07-20). Idempotent lineinfile, regexp-scoped to the zfs_recover line so
+# it preserves the ARC cap line above (and any other options) in the same file.
+- name: Persist zfs_recover=1 in {{ zfs_arc_persist_file }} (idempotent; preserves other options)
+  lineinfile:
+    path: "{{ zfs_arc_persist_file }}"
+    create: true
+    mode: "0644"
+    regexp: '^options zfs zfs_recover='
+    line: "options zfs zfs_recover=1"
+    state: present
+  when: zfs_recover_enabled | bool
+  register: zfs_recover_persist
+
+- name: Report zfs_recover persistence
+  debug:
+    msg: >-
+      zfs_recover=1 persisted in {{ zfs_arc_persist_file }}
+      (changed={{ zfs_recover_persist.changed | default(false) }}). The runtime
+      value (/sys/module/zfs/parameters/zfs_recover) is already 1 on hme-srv-01;
+      this line only ensures a future module reload keeps it.
+  when: zfs_recover_enabled | bool
+
+# --- dataset property tuning ------------------------------------------------
+# Apply recordsize/atime/xattr/relatime per dataset. community.general.zfs is
+# already used by roles/containerd for dataset creation (collection 1.3.6).
+# recordsize applies to NEW writes only; atime/xattr/relatime take effect live.
+- name: Apply dataset properties (recordsize/atime/xattr/relatime)
+  community.general.zfs:
+    name: "{{ item.key }}"
+    state: present
+    extra_zfs_properties: "{{ item.value }}"
+  loop: "{{ zfs_datasets | dict2items }}"
+  when:
+    - zfs_tuning_enabled | bool
+    - zfs_datasets | length > 0
+  register: zfs_dataset_tuning
+
+- name: Report applied dataset properties
+  debug:
+    msg: "zfs set on {{ item.item.key }}: {{ item.item.value }}"
+  loop: "{{ zfs_dataset_tuning.results | default([]) }}"
+  when:
+    - zfs_tuning_enabled | bool
+    - zfs_datasets | length > 0

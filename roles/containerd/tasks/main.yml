@@ -1,0 +1,210 @@
+---
+# Role: containerd — switch snapshotter backend (zfs | overlayfs | native).
+#
+# Destructive steps (reclaim L2ARC, create LV, stop containerd, mount over
+# /var/lib/containerd, restart) are GATED by containerd_perform_migration=true.
+# With the default false the role renders the target config to a .pending file
+# and reports what it WOULD do — it never writes /etc/containerd/config.toml
+# or restarts containerd, so an accidental run cannot half-apply a backend.
+#
+# Why no rsync: containerd's zfs snapshotter stores image layers as ZFS
+# datasets (data/containerd/*); overlayfs stores them as regular files. The
+# formats are incompatible, so the migration does NOT copy data — it points
+# containerd at a fresh ext4-backed root and lets it RE-PULL images as pods
+# restart. The old zfs snapshotter datasets stay in the pool for rollback and
+# are destroyed later (containerd_destroy_zfs_dataset) to reclaim the space.
+#
+# Stopping containerd kills every pod on the node (49 on hme-srv-01, including
+# the Longhorn instance-manager + engine-image data-plane pods). Run the
+# migration deliberately, in a window, with a Longhorn salvage plan ready.
+
+- name: Validate snapshotter choice
+  assert:
+    that:
+      - containerd_snapshotter in ['zfs', 'overlayfs', 'native']
+    fail_msg: "containerd_snapshotter must be zfs | overlayfs | native, got '{{ containerd_snapshotter }}'"
+
+- name: Report plan
+  debug:
+    msg: >-
+      snapshotter={{ containerd_snapshotter }}  root={{ containerd_root }}
+      perform_migration={{ containerd_perform_migration }}
+      {% if containerd_snapshotter == 'overlayfs' -%}
+      | LV={{ containerd_overlay_vg }}/{{ containerd_overlay_lv_name }} ({{ containerd_overlay_lv_size }})
+      reclaim_l2arc={{ containerd_reclaim_l2arc }}
+      {%- endif %}
+
+# ── Render the target config to a .pending file (always; for review) ──────
+- name: Render target config to .pending (review only — not applied yet)
+  template:
+    src: config.toml.j2
+    dest: "{{ containerd_config_file }}.pending"
+    mode: "0644"
+  register: containerd_pending_rendered
+
+- name: Show pending config path
+  debug:
+    msg: "Rendered review config -> {{ containerd_config_file }}.pending (diff against {{ containerd_config_file }} to preview)."
+
+# ── overlayfs: provision the SSD LV (only when actually migrating) ───────
+- name: Reclaim unused ZFS L2ARC cache vdev (frees the 50G SSD LV)
+  command: "zpool remove {{ containerd_l2arc_pool }} {{ containerd_l2arc_lv_dev }}"
+  when:
+    - containerd_snapshotter == 'overlayfs'
+    - containerd_reclaim_l2arc | bool
+    - containerd_perform_migration | bool
+  register: zfs_l2arc_remove
+  changed_when: true
+
+- name: Remove the freed L2ARC logical volume
+  lvol:
+    vg: "{{ containerd_overlay_vg }}"
+    lv: "zfs_l2arc_lv"
+    state: absent
+    force: true
+  when:
+    - containerd_snapshotter == 'overlayfs'
+    - containerd_reclaim_l2arc | bool
+    - containerd_perform_migration | bool
+
+- name: Create the containerd ext4 LV on the SSD ({{ containerd_overlay_lv_size }})
+  lvol:
+    vg: "{{ containerd_overlay_vg }}"
+    lv: "{{ containerd_overlay_lv_name }}"
+    size: "{{ containerd_overlay_lv_size }}"
+    state: present
+  when:
+    - containerd_snapshotter == 'overlayfs'
+    - containerd_perform_migration | bool
+
+- name: Format the containerd LV ({{ containerd_overlay_fstype }})
+  filesystem:
+    fstype: "{{ containerd_overlay_fstype }}"
+    dev: "/dev/{{ containerd_overlay_vg }}/{{ containerd_overlay_lv_name }}"
+  when:
+    - containerd_snapshotter == 'overlayfs'
+    - containerd_perform_migration | bool
+
+# ── THE MIGRATION (DISRUPTIVE: kills all pods on the node) ────────────────
+- name: BLOCK — apply overlayfs migration (requires confirmation)
+  block:
+    - name: Assert migration was explicitly confirmed
+      assert:
+        that: [ containerd_perform_migration | bool ]
+        fail_msg: "Refusing to migrate: containerd_perform_migration is not true."
+
+    - name: "Stop kubelet (so it does not fight containerd during the cutover)"
+      systemd:
+        name: kubelet
+        state: stopped
+
+    - name: "Stop containerd (WARNING: kills every pod on this node)"
+      systemd:
+        name: containerd
+        state: stopped
+
+    # CRITICAL — reap the old containerd's shims + container processes BEFORE
+    # starting the new containerd. Stopping containerd does NOT kill existing
+    # containerd-shim processes: they reparent to init (pid 1) and keep their
+    # containers running. Because we mount a FRESH ext4 root over
+    # /var/lib/containerd, the new containerd has an empty state DB and cannot
+    # adopt those shims — it spawns fresh ones, so the OLD shims/containers
+    # leak as orphans. The hostNetwork ones (metallb speaker :7946, node-exporter
+    # :9100) hold their host ports and the new pods CrashLoop on bind:
+    #   listen tcp 0.0.0.0:9100: bind: address already in use
+    # Killing all kubepods-cgroup processes here is safe because the NEW
+    # containerd has not started yet — only the OLD pods' processes exist.
+    - name: "Reap orphaned shims + all pod processes from the old containerd"
+      shell: |
+        set +e
+        # 1. Kill every containerd-shim (they own the old containers).
+        pkill -9 -x containerd-shim
+        sleep 2
+        # 2. Kill any pod processes that survived the shim kill (reparented to
+        #    init). They live in the kubelet cgroup tree (kubepods.slice on
+        #    systemd cgroup v2, kubepods/ on v1). cgroup.procs lists their PIDs.
+        find /sys/fs/cgroup -path '*kubepods*' -name cgroup.procs 2>/dev/null \
+          | xargs -r cat 2>/dev/null | sort -u | xargs -r kill -9
+        sleep 1
+        echo "orphan shims remaining: $(pgrep -cx containerd-shim)"
+        # 3. Confirm the hostNetwork ports are free for the new pods.
+        for p in 9100 7946; do ss -tlnH "sport = :$p" | head -1 || true; done
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    # Mount the ext4 LV OVER /var/lib/containerd. The existing zfs-era
+    # bookkeeping under it is hidden (not deleted) — unmount to roll back. The
+    # real image data lives in zfs datasets (untouched) for rollback too.
+    - name: Mount the containerd LV over {{ containerd_root }}
+      mount:
+        path: "{{ containerd_root }}"
+        src: "/dev/{{ containerd_overlay_vg }}/{{ containerd_overlay_lv_name }}"
+        fstype: "{{ containerd_overlay_fstype }}"
+        opts: defaults,noatime
+        state: mounted
+
+    - name: Apply the pending config to {{ containerd_config_file }}
+      copy:
+        src: "{{ containerd_config_file }}.pending"
+        dest: "{{ containerd_config_file }}"
+        remote_src: true
+        mode: "0644"
+        backup: true
+
+    - name: Reload systemd and start containerd (re-pulls images as pods restart)
+      systemd:
+        name: containerd
+        state: started
+        daemon_reload: yes
+
+    - name: Wait for containerd socket
+      command: "test -S {{ containerd_state }}/containerd.sock"
+      retries: 10
+      delay: 2
+      register: sock_wait
+      until: sock_wait.rc == 0
+      changed_when: false
+
+    - name: "Start kubelet (pods re-pull images into overlayfs as they restart)"
+      systemd:
+        name: kubelet
+        state: started
+
+    - name: (Optional, post-verify) destroy the old zfs snapshotter dataset to reclaim pool space
+      command: "zfs destroy -r {{ containerd_zfs_dataset }}"
+      when: containerd_destroy_zfs_dataset | default(false) | bool
+  when:
+    - containerd_snapshotter == 'overlayfs'
+    - containerd_perform_migration | bool
+
+# ── zfs branch: reproduce today's setup (idempotent, safe) ────────────────
+- name: Ensure the zfs snapshotter dataset exists ({{ containerd_zfs_dataset }})
+  community.general.zfs:
+    name: "{{ containerd_zfs_dataset }}"
+    state: present
+    mountpoint: legacy
+  when:
+    - containerd_snapshotter == 'zfs'
+    - containerd_perform_migration | bool
+
+- name: Apply the pending config (zfs re-apply)
+  copy:
+    src: "{{ containerd_config_file }}.pending"
+    dest: "{{ containerd_config_file }}"
+    remote_src: true
+    mode: "0644"
+    backup: true
+  register: containerd_zfs_config_applied
+  when:
+    - containerd_snapshotter == 'zfs'
+    - containerd_perform_migration | bool
+
+- name: Restart containerd to apply zfs config (if changed)
+  systemd:
+    name: containerd
+    state: restarted
+  when:
+    - containerd_snapshotter == 'zfs'
+    - containerd_perform_migration | bool
+    - containerd_zfs_config_applied.changed | default(false)

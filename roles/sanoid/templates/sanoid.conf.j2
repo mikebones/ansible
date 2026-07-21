@@ -1,0 +1,19 @@
+# Managed by Ansible role `sanoid` — do not edit by hand; re-run the role.
+# To activate, render this to /etc/sanoid/sanoid.conf (the role does this when
+# sanoid_apply=true) and enable sanoid.timer.
+#
+# Local point-in-time snapshot policy for hme-srv-01's `data` pool. No off-pool
+# replication here (that's #38, deferred). Snapshot pruning is a per-snapshot
+# `zfs destroy` (no livelists -> no allocator-wedge risk on this fragile pool).
+# Every [dataset] block below names its template explicitly; sanoid treats any
+# non-template_* section as a dataset, so do NOT add a catch-all/default block.
+
+{% for d in sanoid_datasets %}
+[{{ d.name }}]
+use_template = {{ d.template }}
+{% endfor %}
+{% for tname, props in sanoid_templates.items() %}
+[template_{{ tname }}]
+{% for k, v in props.items() %}{{ k }} = {{ v }}
+{% endfor %}autoprune = yes
+{% endfor %}

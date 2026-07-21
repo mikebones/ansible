@@ -1,0 +1,90 @@
+---
+# Role: sanoid — install sanoid, render sanoid.conf (to .pending for review),
+# and — only when sanoid_apply=true — activate it + enable the timer.
+# See defaults/main.yml for the gated-apply convention and the wedge-safety note.
+
+- name: Assert ZFS is present (sanoid manages zfs datasets)
+  command: which zpool
+  register: sanoid_zfs_check
+  changed_when: false
+  failed_when: sanoid_zfs_check.rc != 0
+
+# --- install ---------------------------------------------------------------
+- name: Install sanoid from apt (noble/universe, 2.2.0-1)
+  apt:
+    name: sanoid
+    state: present
+    update_cache: yes
+  when: sanoid_install_method == 'apt'
+  register: sanoid_install
+
+- name: Assert sanoid binary is on PATH
+  command: which sanoid
+  register: sanoid_which
+  changed_when: false
+  failed_when: sanoid_which.rc != 0
+
+- name: Report sanoid install
+  debug:
+    msg: "sanoid installed (changed={{ sanoid_install.changed | default(false) }}): {{ sanoid_which.stdout | trim }}"
+
+# --- render config for review ----------------------------------------------
+- name: Ensure sanoid config dir exists
+  file:
+    path: "{{ sanoid_conf_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Render sanoid.conf to {{ sanoid_conf_pending }} (review; not live yet)
+  template:
+    src: sanoid.conf.j2
+    dest: "{{ sanoid_conf_pending }}"
+    mode: "0644"
+  register: sanoid_conf_rendered
+
+- name: Report rendered config location
+  debug:
+    msg: >-
+      Rendered {{ sanoid_conf_pending }} (changed={{ sanoid_conf_rendered.changed }}).
+      Review it, then re-run with -e sanoid_apply=true to activate + enable the timer.
+
+# --- gated apply: activate config + enable timer ---------------------------
+# Only runs when the operator passes -e sanoid_apply=true. Until then the live
+# sanoid.conf is untouched and the timer stays disabled (no snapshots taken).
+- name: Apply the pending config live (sanoid_apply=true)
+  copy:
+    src: "{{ sanoid_conf_pending }}"
+    dest: "{{ sanoid_conf_path }}"
+    remote_src: true
+    mode: "0644"
+    backup: true
+  register: sanoid_conf_applied
+  when: sanoid_apply | bool
+
+- name: Reload systemd (pick up sanoid units if newly installed)
+  systemd:
+    daemon_reload: yes
+  when: sanoid_apply | bool
+
+- name: Enable + start sanoid.timer (creates + prunes snapshots every 15 min)
+  systemd:
+    name: sanoid.timer
+    state: started
+    enabled: yes
+  when: sanoid_apply | bool
+
+- name: Restart sanoid.service so it picks up the new config now
+  systemd:
+    name: sanoid.service
+    state: restarted
+  when:
+    - sanoid_apply | bool
+    - sanoid_conf_applied.changed | default(false)
+
+- name: Report sanoid activation
+  debug:
+    msg: >-
+      sanoid.conf applied live + sanoid.timer enabled. First snapshots appear on
+      the next timer tick (~15 min): `zfs list -t snapshot -r data`. MONITOR the
+      first prune cycle (see playbook header) for allocator stress.
+  when: sanoid_apply | bool

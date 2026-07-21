@@ -1,0 +1,16 @@
+---
+# Role: dm_crypt
+# Loads dm_crypt kernel module and persists it across reboots
+
+- name: Load dm_crypt kernel module
+  modprobe:
+    name: dm_crypt
+    state: present
+  become: yes
+
+- name: Persist dm_crypt module across reboots
+  lineinfile:
+    path: /etc/modules-load.d/modules.conf
+    line: dm_crypt
+    create: yes
+  become: yes

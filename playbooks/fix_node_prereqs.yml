@@ -1,0 +1,42 @@
+---
+# playbooks/fix_node_prereqs.yml
+# One-shot: install node prerequisites the freshly-rebuilt workers are missing.
+#
+# hme-srv-02/03 were rebuilt with Ubuntu 26.04 and joined via join_nodes.yml,
+# but roles/kubeadm_install at the time installed no nfs-common, so NFS-backed
+# PVs (ftp, lidarr, navidrome, syncthing, transmission-movies) failed to mount
+# with "bad option; you might need a /sbin/mount.<type> helper". nfs-common is
+# now also installed durably in roles/kubeadm_install; this playbook applies it
+# to the already-joined nodes without re-running the full join.
+#
+# Run from WSL (the repo lives at /mnt/c/Users/Mike-/git/ansible, which is
+# world-writable so ansible.cfg is ignored — set paths via env vars):
+#   wsl bash -lc 'cd /mnt/c/Users/Mike-/git/ansible && \
+#     ANSIBLE_ROLES_PATH=roles ANSIBLE_INVENTORY=inventory \
+#     ANSIBLE_HOST_KEY_CHECKING=False \
+#     ansible-playbook playbooks/fix_node_prereqs.yml'
+#
+# new_workers (hme-srv-02/03) auth with a password from
+# group_vars/new_workers.yml (no SSH key deployed yet); the existing nodes keep
+# key auth + passwordless sudo from group_vars/all.yml. After install, the
+# kubelet retries NFS mounts automatically — delete any stuck NFS pods to
+# force an immediate re-mount (done from Git Bash with kubectl, not here).
+
+- name: Install missing node prerequisites on the rebuilt workers
+  hosts: new_workers
+  become: yes
+  tasks:
+    - name: Install nfs-common (provides /sbin/mount.nfs for NFS PV mounts)
+      apt:
+        name: nfs-common
+        state: present
+        update_cache: yes
+
+    - name: Confirm the NFS mount helper is present
+      command: which mount.nfs
+      register: mount_nfs_path
+      changed_when: false
+
+    - name: Show the mount helper path
+      debug:
+        msg: "mount.nfs -> {{ mount_nfs_path.stdout }} on {{ inventory_hostname }}"

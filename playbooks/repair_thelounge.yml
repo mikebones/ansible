@@ -1,0 +1,6 @@
+---
+# Repair degraded thelounge volume by restoring replica count
+# Runs on localhost since it uses the Longhorn REST API
+- hosts: localhost
+  roles:
+    - thelounge_repair

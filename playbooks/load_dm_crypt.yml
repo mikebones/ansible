@@ -1,0 +1,5 @@
+---
+# Load dm_crypt kernel module on all k8s nodes and persist across reboots
+- hosts: k8s_nodes
+  roles:
+    - dm_crypt

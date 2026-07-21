@@ -1,0 +1,65 @@
+---
+# Role: zfs — ZFS tuning (ARC cap, sized as a % of total RAM with a
+# metadata-floor safety check). Reusable; not hme-srv-01-specific.
+#
+# Apply:  ansible-playbook playbooks/tune_storage.yml -e "zfs_arc_pct=50"
+
+# --- ARC cap ---------------------------------------------------------------
+# Enable capping the ZFS ARC. When true, the role sets zfs_arc_max live
+# (sysfs) and persists it in zfs_arc_persist_file.
+zfs_arc_enabled: true
+
+# Target ARC cap as a PERCENTAGE of total RAM.
+#   50% is the ZFS default and a sane starting point. On a memory-tight node
+#   that also runs kubelet/containerd/Longhorn/Plex (e.g. hme-srv-01, 24 GiB),
+#   lower this once the ZFS dataset count (and thus arc_meta) comes down —
+#   e.g. after moving containerd off the zfs snapshotter.
+zfs_arc_pct: 50
+
+# Hard minimum cap (bytes). Never set the cap below this, even if pct-of-RAM
+# and the metadata floor are both tiny. Prevents an over-eager low-pct from
+# zeroing the ARC on a large-RAM box.
+zfs_arc_min_bytes: 5368709120   # 5 GiB
+
+# Buffer added on top of the measured arc_meta floor (bytes). The cap is never
+# set below (arc_meta_used + this buffer). Capping below the metadata floor is
+# a trap: arc_prune runs perpetually trying to evict pinned metadata it cannot
+# evict (observed 21% CPU thrash when capped to 6 GiB against a ~10 GiB floor
+# on hme-srv-01 during the 2026-07-19 RCA). See tasks/main.yml.
+zfs_arc_meta_buffer_bytes: 2147483648   # 2 GiB
+
+# Where to persist the cap (survives reboot). Other options in this file are
+# preserved (managed with lineinfile, regexp-scoped to the arc_max line).
+zfs_arc_persist_file: /etc/modprobe.d/zfs.conf
+
+# Live sysfs knob the role writes to apply the cap immediately.
+zfs_arc_sysfs: /sys/module/zfs/parameters/zfs_arc_max
+
+# Path to the ARC stats kstat (used to read arc_meta_used / current size).
+zfs_arcstats_path: /proc/spl/kstat/zfs/arcstats
+
+# --- zfs_recover persistence ------------------------------------------------
+# hme-srv-01's `data` pool imports ONLY with zfs_recover=1 (spacemap corruption
+# 2026-07-20 from a zfs destroy -r on the 86%-full/26%-frag pool — see
+# docs/incident-2026-07-20-hme-srv-01-zfs-destroy-wedge.md). Without it the
+# boot-time zfs-import-cache.service panics with "adding existent segment to
+# range tree" and the node hangs. The option was added manually to
+# /etc/modprobe.d/zfs.conf during recovery; this role now MANAGES that line so a
+# future module reload / kernel change / rebuild can't silently lose it.
+# Off by default (only hme-srv-01 needs it); pin true in that host's host_vars.
+zfs_recover_enabled: false
+
+# --- dataset property tuning ------------------------------------------------
+# Apply live ZFS dataset properties (recordsize/atime/xattr/relatime) via
+# community.general.zfs. Idempotent; mirrors properties that were applied by
+# hand on hme-srv-01 during WS1, and adds per-dataset recordsize tuning:
+#   data/complete    recordsize=1M   large sequential media writes
+#   data/plex-config recordsize=16K  small random writes (Plex SQLite DB)
+#   data/*           atime=off xattr=sa (less metadata churn)
+# recordsize only affects NEW writes (existing blocks unchanged) -> safe to set
+# live. Default true (low-risk, no behavior change vs current live state).
+zfs_tuning_enabled: false
+
+# Dict of {dataset: {property: value, ...}}. Empty by default; populate in
+# host_vars. Properties are applied as-is to the live dataset.
+zfs_datasets: {}

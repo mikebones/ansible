@@ -1,0 +1,15 @@
+---
+# group_vars/new_workers.yml
+# The two freshly-installed R720 worker nodes. They authenticate with a password
+# (no SSH key deployed yet) and sudo needs the password too. The existing nodes
+# keep passwordless sudo + key auth from group_vars/all.yml — these vars only
+# apply to the new_workers group.
+ansible_ssh_pass: "0830Bones!"
+# Passwordless sudo for `administrator` is set up on these nodes (see
+# setup_sudo.sh) to match the existing cluster nodes, so no become password.
+
+# Install kubelet/kubeadm/kubectl at the cluster's current version so the new
+# nodes join v1.29.7 cleanly, then the upgrade playbook (Phase B) moves the
+# whole cluster up to v1.36.x one minor at a time.
+k8s_join_minor: "1.29"      # pkgs.k8s.io apt repo channel
+k8s_join_patch: "1.29.7-1.1"  # full apt version (pkgs.k8s.io uses -1.1 build suffix)

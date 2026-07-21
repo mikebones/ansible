@@ -1,0 +1,40 @@
+---
+# Tune the storage node (hme-srv-01): cap the ZFS ARC and switch containerd's
+# snapshotter backend. See roles/zfs and roles/containerd.
+#
+# Run from WSL (the repo lives at /mnt/c/Users/Mike-/git/ansible, which is
+# world-writable so ansible.cfg is ignored — set paths via env vars):
+#
+# ARC cap (safe, idempotent; RAM% + metadata-floor aware):
+#   wsl bash -lc 'cd /mnt/c/Users/Mike-/git/ansible && \
+#     ANSIBLE_ROLES_PATH=roles ANSIBLE_INVENTORY=inventory \
+#     ANSIBLE_HOST_KEY_CHECKING=False \
+#     ansible-playbook playbooks/tune_storage.yml --tags zfs -e zfs_arc_pct=50'
+#
+# Render containerd config only (DRY; no pod disruption):
+#   ... ansible-playbook playbooks/tune_storage.yml --tags containerd \
+#       -e containerd_snapshotter=overlayfs
+#
+# ACTUALLY migrate containerd to overlayfs on the SSD (DISRUPTIVE: stops
+# kubelet + containerd, killing all pods on hme-srv-01 incl. the Longhorn
+# instance-manager and engine-image data-plane pods — confirm before running,
+# and have a salvage plan for hme-srv-01's Longhorn volumes ready):
+#   ... ansible-playbook playbooks/tune_storage.yml --tags containerd \
+#       -e containerd_snapshotter=overlayfs -e containerd_perform_migration=true
+#
+# The role stops kubelet + containerd, reaps the old containerd-shim processes
+# and kubepods-cgroup container processes (orphaned shims survive a containerd
+# restart and hold hostNetwork ports — metallb speaker :7946, node-exporter
+# :9100 — causing CrashLoopBackOff bind conflicts on the fresh state DB), then
+# mounts the ext4 LV, applies the overlayfs config, and restarts containerd +
+# kubelet. CORDON + DRAIN the node with kubectl first so replicatable pods
+# reschedule; the role itself does not call the kube-apiserver.
+
+- name: Storage tuning for hme-srv-01
+  hosts: hme-srv-01
+  become: yes
+  roles:
+    - role: zfs
+      tags: [zfs]
+    - role: containerd
+      tags: [containerd]

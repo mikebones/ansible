@@ -1,0 +1,75 @@
+# Managed by Ansible role `containerd` — snapshotter={{ containerd_snapshotter }}.
+# Do not edit by hand; re-run the role. To switch backends, set containerd_snapshotter
+# (zfs | overlayfs | native) and (for overlayfs) containerd_perform_migration=true.
+version = 3
+root = "{{ containerd_root }}"
+state = "{{ containerd_state }}"
+
+[grpc]
+  address = "{{ containerd_state }}/containerd.sock"
+
+[plugins]
+{% if containerd_snapshotter == 'zfs' %}
+  # --- ZFS snapshotter (backed by pool {{ containerd_zfs_pool }}) ---
+  [plugins."io.containerd.snapshotter.v1.zfs"]
+    root_path = "{{ containerd_zfs_root }}"
+
+  [plugins."io.containerd.cri.v1.runtime"]
+    [plugins."io.containerd.cri.v1.runtime".containerd]
+      snapshotter = "zfs"
+      default_runtime_name = "runc"
+      [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runc]
+        runtime_type = "{{ containerd_runtime_type }}"
+        snapshotter = "zfs"
+        [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runc.options]
+          SystemdCgroup = {{ containerd_systemd_cgroup | lower }}
+
+  [plugins."io.containerd.cri.v1.images"]
+    snapshotter = "zfs"
+    disable_snapshot_annotations = false
+    [plugins."io.containerd.cri.v1.images".pinned_images]
+      sandbox = "{{ containerd_pause_image }}"
+
+  [plugins."io.containerd.grpc.v1.cri".containerd]
+    snapshotter = "zfs"
+    [plugins."io.containerd.grpc.v1.cri".containerd.snapshotter_platforms]
+      zfs = ["linux/amd64"]
+{% elif containerd_snapshotter == 'overlayfs' %}
+  # --- overlayfs snapshotter (backed by ext4 LV on the SSD) ---
+  [plugins."io.containerd.cri.v1.runtime"]
+    [plugins."io.containerd.cri.v1.runtime".containerd]
+      snapshotter = "overlayfs"
+      default_runtime_name = "runc"
+      [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runc]
+        runtime_type = "{{ containerd_runtime_type }}"
+        [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runc.options]
+          SystemdCgroup = {{ containerd_systemd_cgroup | lower }}
+
+  [plugins."io.containerd.cri.v1.images"]
+    snapshotter = "overlayfs"
+    disable_snapshot_annotations = false
+    [plugins."io.containerd.cri.v1.images".pinned_images]
+      sandbox = "{{ containerd_pause_image }}"
+
+  [plugins."io.containerd.grpc.v1.cri".containerd]
+    snapshotter = "overlayfs"
+{% elif containerd_snapshotter == 'native' %}
+  # --- native snapshotter ---
+  [plugins."io.containerd.cri.v1.runtime"]
+    [plugins."io.containerd.cri.v1.runtime".containerd]
+      snapshotter = "native"
+      default_runtime_name = "runc"
+      [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runc]
+        runtime_type = "{{ containerd_runtime_type }}"
+        [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runc.options]
+          SystemdCgroup = {{ containerd_systemd_cgroup | lower }}
+
+  [plugins."io.containerd.cri.v1.images"]
+    snapshotter = "native"
+    disable_snapshot_annotations = false
+    [plugins."io.containerd.cri.v1.images".pinned_images]
+      sandbox = "{{ containerd_pause_image }}"
+
+  [plugins."io.containerd.grpc.v1.cri".containerd]
+    snapshotter = "native"
+{% endif %}

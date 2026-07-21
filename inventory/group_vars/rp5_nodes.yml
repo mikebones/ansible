@@ -1,0 +1,13 @@
+---
+# group_vars/rp5_nodes.yml
+# The Raspberry Pi control-plane + worker nodes run Debian and use a different
+# login user than the home servers: `mcostas` (uid 1000), not `administrator`.
+# mcostas has passwordless sudo (sudoers.d/010_pi-nopasswd) and the WSL
+# id_ed25519 key is in its authorized_keys, so key auth + passwordless become
+# work the same as the existing-node convention.
+ansible_user: mcostas
+ansible_ssh_private_key_file: ~/.ssh/id_ed25519
+
+# Longhorn disk reservation for the rp5 nodes (pre-existing).
+longhorn_disk_reserved_percent: 20
+longhorn_disk_reserved_bytes: 196563697664

@@ -1,0 +1,47 @@
+---
+# Role: sanoid — local ZFS snapshot management for hme-srv-01's `data` pool.
+#
+# Greenfield: no sanoid/syncoid/zfs send existed anywhere in the repo before
+# this (the 90 @snapshot entries on data/containerd were clone-chain junk, all
+# destroyed 2026-07-20). This role delivers local point-in-time snapshots only
+# (protects against accidental deletion / bad writes / ransomware — logical
+# errors). Off-pool replication (zfs send to a backup pool on hme-srv-02) is a
+# SEPARATE follow-on (#38, deferred); local snapshots do NOT protect against
+# disk/pool failure.
+#
+# SAFETY on this pool: snapshot PRUNING is a `zfs destroy` of an old snapshot.
+# Unlike the clone-tree destroy that wedged the metaslab allocator on 2026-07-20
+# (livelist metadata allocation on the 86%-full pool), snapshot destroy uses NO
+# livelists -> it does not carry that wedge risk, and sanoid prunes one snapshot
+# at a time (never `zfs destroy -r`). Still: monitor the FIRST prune cycle (see
+# playbooks/snapshot_setup.yml verification) once snapshots age past retention.
+#
+# Apply convention mirrors roles/containerd: the config is rendered to
+# sanoid.conf.pending for review by default, and the timer is only enabled when
+# sanoid_apply=true is passed on the command line. Never default sanoid_apply
+# to true — let the operator review the rendered config first.
+
+# --- install ----------------------------------------------------------------
+# sanoid 2.2.0-1 is in apt noble/universe (confirmed on hme-srv-01). The apt
+# package ships the sanoid binary + a systemd sanoid.timer (runs sanoid.service
+# every 15 min, which creates due snapshots and prunes expired ones).
+sanoid_install_method: apt
+
+# --- config -----------------------------------------------------------------
+sanoid_conf_dir: /etc/sanoid
+sanoid_conf_path: /etc/sanoid/sanoid.conf
+sanoid_conf_pending: /etc/sanoid/sanoid.conf.pending
+
+# Gated apply: false = render .pending only (review). Pass -e sanoid_apply=true
+# to copy .pending -> sanoid.conf and enable+start sanoid.timer.
+sanoid_apply: false
+
+# Per-dataset snapshot policy, populated in host_vars/hme-srv-01.yml.
+#   sanoid_datasets:  list of {name: <dataset>, template: <template_name>}
+#   sanoid_templates: dict of {template_name: {frequently: N, hourly: N, ...}}
+# Retention keys sanoid understands: frequently, hourly, daily, weekly,
+# monthly, yearly (0 = none of that granularity). `frequently` fires on each
+# sanoid.timer tick (package default 15 min). autoprune=yes is appended to
+# every template by the template so expired snapshots are reaped automatically.
+sanoid_datasets: []
+sanoid_templates: {}

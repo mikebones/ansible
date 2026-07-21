@@ -1,0 +1,5 @@
+---
+# Install cryptsetup on all rp5 nodes to satisfy Longhorn prerequisite
+- hosts: rp5_nodes
+  roles:
+    - cryptsetup

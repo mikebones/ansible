@@ -1,0 +1,12 @@
+ansible_user: administrator
+ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+longhorn_api: http://longhorn.costascomputers.com
+
+# Kubernetes API endpoint. The hostname is a local DNS name (costascomputers.com
+# is served by the LAN resolver at 192.168.1.64, but some nodes' systemd-resolved
+# prefers the public 1.1.1.1 upstream and can't resolve it). The established
+# cluster convention — already in hme-srv-01's /etc/hosts — is to pin the API
+# hostname to the control-plane LAN IP so kubelet never depends on DNS for it.
+# roles/kubeadm_install and roles/kubeadm_upgrade both ensure this pin is present.
+k8s_api_hostname: "k8s.costascomputers.com"
+k8s_api_ip: "192.168.1.166"

@@ -1,0 +1,55 @@
+---
+# Role: containerd — configure containerd's snapshotter backend.
+#
+# Parameterized so the snapshotter is reproducible and switchable per node.
+# hme-srv-01 was migrated zfs -> overlayfs on 2026-07-19 (pinned in
+# inventory/host_vars/hme-srv-01.yml). It previously ran the `zfs` snapshotter
+# with its root on pool `data` (dataset `data/containerd`), which put every
+# image/layer/snapshot on the same saturated HDD pool that serves NFS AND
+# created a ZFS dataset per snapshot, serializing CreateContainer under load
+# -> CreateContainerError loops on ~13 pods. overlayfs on the SSD (reclaiming
+# the unused 50 GiB L2ARC LV) takes containerd off the HDD pool and removes
+# the per-snapshot dataset sprawl that churned ARC. See docs/rca-...md section 10.
+#
+# containerd_snapshotter:
+#   zfs       — zfs snapshotter on pool `data` (pre-migration hme-srv-01)
+#   overlayfs — overlayfs on an ext4 LV on the SSD (hme-srv-01 since 2026-07-19)
+#   native    — containerd native snapshotter (passthrough)
+containerd_snapshotter: zfs
+
+# --- shared ---------------------------------------------------------------
+containerd_config_file: /etc/containerd/config.toml
+containerd_root: /var/lib/containerd
+containerd_state: /run/containerd
+containerd_pause_image: "registry.k8s.io/pause:3.10"
+containerd_runtime_type: io.containerd.runc.v2
+containerd_systemd_cgroup: true
+
+# --- zfs backend ----------------------------------------------------------
+containerd_zfs_pool: data
+containerd_zfs_dataset: "{{ containerd_zfs_pool }}/containerd"
+containerd_zfs_root: "{{ containerd_root }}/io.containerd.snapshotter.v1.zfs"
+
+# --- overlayfs backend (migration target on hme-srv-01) ------------------
+# The ext4 LV is carved from the SSD VG by reclaiming the unused L2ARC LV.
+containerd_overlay_vg: ubuntu-vg
+containerd_overlay_lv_name: containerd
+containerd_overlay_lv_size: 50g
+containerd_overlay_fstype: ext4
+containerd_overlay_mount: /var/lib/containerd
+# Reclaim the ZFS L2ARC (cache vdev) before creating the LV. L2ARC is currently
+# 0% utilised and lives on the same SSD VG, so reclaiming it loses nothing.
+containerd_reclaim_l2arc: true
+containerd_l2arc_pool: data
+containerd_l2arc_lv_dev: "{{ containerd_overlay_vg }}/zfs_l2arc_lv"
+
+# --- migration safety -----------------------------------------------------
+# The overlayfs migration REQUIRES stopping containerd, which kills every pod
+# on the node (49 on hme-srv-01, including the Longhorn instance-manager +
+# engine-image data-plane pods). Set containerd_perform_migration=true to
+# actually execute the stop/rsync/start steps; otherwise the role only renders
+# the config and reports what it WOULD do. Never default this to true.
+containerd_perform_migration: false
+
+# rsync is used to copy the existing zfs snapshotter root onto the ext4 LV.
+containerd_rsync_bin: rsync

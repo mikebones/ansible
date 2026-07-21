@@ -1,0 +1,86 @@
+---
+# Upgrade the Kubernetes cluster ONE minor version at a time.
+# Pass the target minor with -e k8s_target_minor=<minor>. The role installs the
+# latest patch in that pkgs.k8s.io channel (no hardcoded patch/suffix).
+#
+# PROGRESS (hme-srv-01 relief applied 2026-07-19: ARC capped via roles/zfs, load
+# 84->4, nfsd healthy; structural containerd/Longhorn work deferred — see
+# docs/rca-2026-07-18-hme-srv-01-nfs-deadlock.md section 10. Upgrade RESUMED):
+#   1.29 -> 1.30  DONE   (all 7 nodes Ready @ v1.30.14)
+#   1.30 -> 1.31  DONE   (all 7 nodes Ready @ v1.31.14)
+#   1.31 -> 1.32  DONE   (all 7 nodes Ready @ v1.32.13)
+#   1.32 -> 1.33  DONE   (all 7 nodes Ready @ v1.33.13)
+#   1.33 -> 1.34  DONE   (all 7 nodes Ready @ v1.34.9)
+#   1.34 -> 1.35  DONE   (all 7 nodes Ready @ v1.35.6)
+#   1.35 -> 1.36  DONE   (all 7 nodes Ready @ v1.36.2)   <-- CURRENT STATE (complete)
+#   1.34 -> 1.35  PENDING
+#   1.35 -> 1.36  PENDING
+#
+# WORKING PATTERN (learned during the 1.30/1.31 hops — read before running):
+#
+#   * Run with `-e drain_nodes=false`. This cluster's PDBs pin single-replica
+#     stateful workloads (Longhorn instance-manager per storage node, loki-write,
+#     vault, istiod) to allowedDisruptions=0, so `kubectl drain` fails on every
+#     worker. With drain_nodes=false the role does cordon -> upgrade-in-place ->
+#     uncordon: running pods stay live across the kubelet restart (containerd
+#     holds the containers; only a brief status blip), no eviction, no PDB
+#     conflict, no stateful-workload downtime. `kubeadm upgrade node` does not
+#     require a drain.
+#
+#   * Run the CONTROL PLANE and the WORKERS as separate invocations, not one
+#     full-playbook run. `kubeadm upgrade apply` restarts the apiserver static
+#     pod, and for ~10-20s afterward RBAC returns Forbidden to kubectl. The
+#     cordon task has retries:6/delay:10 to tolerate this, but running CP first
+#     (then workers) avoids the race entirely and keeps each invocation short.
+#
+#   * DO NOT run the whole cluster in one 600s-capped background job. A slow
+#     node (hme-srv-01 under ZFS/NFS/rebuild load) can blow the budget; when the
+#     WSL-side ansible is SIGKILLed it ORPHANS the remote apt-get, which keeps
+#     running and holds the dpkg lock (stuck in the needrestart post-invoke
+#     hook). Run foreground, in small batches that fit in the timeout.
+#
+#   * hme-srv-01 is a SLOW node (ZFS pool 85% full, nfsd under load, rebuilds).
+#     Its apt `needrestart` post-invoke hook can hang for minutes scanning
+#     processes. If a role apt task stalls on hme-srv-01, finish that node
+#     manually with `NEEDRESTART_MODE=l DEBIAN_FRONTEND=noninteractive` (see
+#     docs/rca-2026-07-18-hme-srv-01-nfs-deadlock.md).
+#
+#   * Longhorn `auto-salvage` was set to false during the upgrade so transient
+#     node-NotReady windows from kubelet restarts don't trigger replica
+#     rebuilds (replicas don't actually die). Re-enable it / manually salvage
+#     the faulted detached volumes as part of the post-upgrade RCA.
+#
+#   * After a worker hop, nodeInfo.kubeletVersion can lag the Ready condition
+#     by ~25-30s: the restarted kubelet's informer cache is cold and it logs
+#     "Error getting the current node from lister ... not found" until it
+#     re-registers ("Successfully registered node"), at which point it PATCHes
+#     nodeInfo. The role's "Wait for Ready" gate is correct (Ready flips first);
+#     if a post-hop version check shows an old version on one node, re-query
+#     after ~30s before concluding the hop failed.
+#
+# Example hop (1.31 -> 1.32):
+#   # 1. control plane:
+#   ANSIBLE_ROLES_PATH=roles ANSIBLE_INVENTORY=inventory ANSIBLE_HOST_KEY_CHECKING=False \
+#     ansible-playbook playbooks/upgrade_k8s.yml -e "k8s_target_minor=1.32" -e "drain_nodes=false" --limit rp5-0
+#   # 2. workers (foreground, small batches; e.g. the fast new nodes first, then the rp5s, then hme-srv-01):
+#   ... --limit hme-srv-02,hme-srv-03        # fast new nodes
+#   ... --limit rp5-1,rp5-2,rp5-3           # rp5 workers (NFS mounts to hme-srv-01 — verify responsive first)
+#   ... --limit hme-srv-01                  # slow node — watch apt; fall back to NEEDRESTART_MODE=l manual finish
+#   # 3. verify: kubectl get nodes -o wide   (all 7 at v1.32.x, all Ready, all schedulable)
+#
+# Before each CP hop, confirm rp5-0 has no hung hard NFS mounts (cAdvisor blocks
+# on statfs of a dead hard NFS mount at kubelet 1.30+ startup):
+#   awk '$3 ~ /nfs4/ && $4 ~ /,hard,/ {print $2}' /proc/mounts   # on rp5-0; must be empty or all statfs-OK
+
+- name: Upgrade control plane to v{{ k8s_target_minor }}
+  hosts: k8s_control_plane
+  become: yes
+  roles:
+    - kubeadm_upgrade
+
+- name: Upgrade worker nodes to v{{ k8s_target_minor }}
+  hosts: k8s_workers
+  become: yes
+  serial: 1
+  roles:
+    - kubeadm_upgrade
