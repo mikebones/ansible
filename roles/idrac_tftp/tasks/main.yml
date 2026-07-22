@@ -6,10 +6,10 @@
 # --- verify the user staged the firmware files -----------------------------
 # Fail fast with a clear message if the Dell firmware binaries are missing
 # (they're the manual prerequisite — Dell-licensed, gitignored, user-supplied).
-- name: Verify staged firmware files exist in {{ idrac_fw_staging }}
+- name: Verify staged firmware source files exist in {{ idrac_fw_staging }}
   stat:
-    path: "{{ idrac_fw_staging }}/{{ item }}"
-  loop: "{{ idrac_fw_files }}"
+    path: "{{ idrac_fw_staging }}/{{ item.src }}"
+  loop: "{{ idrac_fw_images }}"
   register: idrac_fw_stat
   changed_when: false
   # files/idrac-fw/ lives on the ansible CONTROLLER (WSL/Windows), not on the
@@ -21,12 +21,12 @@
 - name: Fail if any firmware file is missing (user prerequisite not done)
   fail:
     msg: >-
-      Missing {{ item.item }} in {{ idrac_fw_staging }}. The Dell-required
+      Missing {{ item.item.src }} in {{ idrac_fw_staging }}. The Dell-required
       12th-gen R720 path is 1.23.23 -> 1.66.65 -> 2.10.10.10 -> 2.65.65.65
       (three hops; 2.30.30.30 is NOT needed). Download each Dell Application
       .exe from the R720 driver page (or dl.dell.com CDN with a Referer
-      header), extract firmimg.d7 with 7-Zip, rename to {{ item.item }}, and
-      place it in {{ idrac_fw_staging }}/. See ~/git/idrac/NOTES.md
+      header), extract firmimg.d7 with 7-Zip, rename to {{ item.item.src }},
+      and place it in {{ idrac_fw_staging }}/. See ~/git/idrac/NOTES.md
       "Firmware upgrade runbook" (download is automatable — see prereq there).
   loop: "{{ idrac_fw_stat.results }}"
   when: not item.stat.exists
@@ -60,14 +60,24 @@
   register: idrac_tftp_conf
   when: idrac_tftp_enabled | bool
 
-- name: Deploy staged firmware files to TFTP root
+- name: Ensure per-version firmware subdirs exist under TFTP root
+  file:
+    path: "{{ idrac_tftp_root }}/{{ item.version }}"
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+  loop: "{{ idrac_fw_images }}"
+  when: idrac_tftp_enabled | bool
+
+- name: Deploy staged firmware to <root>/<version>/firmimg.d7
   copy:
-    src: "{{ idrac_fw_staging }}/{{ item }}"
-    dest: "{{ idrac_tftp_root }}/{{ item }}"
+    src: "{{ idrac_fw_staging }}/{{ item.src }}"
+    dest: "{{ idrac_tftp_root }}/{{ item.version }}/firmimg.d7"
     mode: "0644"
     owner: root
     group: root
-  loop: "{{ idrac_fw_files }}"
+  loop: "{{ idrac_fw_images }}"
   when: idrac_tftp_enabled | bool
   register: idrac_fw_deploy
 
@@ -89,8 +99,8 @@
   when: idrac_tftp_enabled | bool
 
 # --- self-check: the daemon serves the files -------------------------------
-- name: Self-check TFTP get of a firmware file
-  command: "tftp 127.0.0.1 -c get {{ idrac_fw_files[0] }} /tmp/_idrac_fw_probe"
+- name: Self-check TFTP get of a firmware file (from per-version subdir)
+  command: "tftp 127.0.0.1 -c get {{ idrac_fw_images[0].version }}/firmimg.d7 /tmp/_idrac_fw_probe"
   changed_when: false
   when: idrac_tftp_enabled | bool
 
@@ -105,9 +115,11 @@
   debug:
     msg: >-
       tftpd-hpa serving {{ idrac_tftp_root }} on {{ idrac_tftp_address }}.
-      iDRACs can pull: `racadm fwupdate -g -u -a {{ ansible_host |
-      default('192.168.1.231') }} -d <file>`. Teardown after the upgrade:
-      re-run with -e idrac_tftp_enabled=false.
+      iDRACs pull per-version images as <version>/firmimg.d7 — flash with
+      `racadm fwupdate -g -u -a {{ ansible_host | default('192.168.1.231') }}
+      -d <version>` (e.g. -d 1.66.65). See ~/git/idrac/idrac-fwupdate.py
+      (--step 166/210/265). Teardown after the upgrade: re-run with
+      -e idrac_tftp_enabled=false.
   when: idrac_tftp_enabled | bool
 
 # --- teardown (idrac_tftp_enabled=false) -----------------------------------

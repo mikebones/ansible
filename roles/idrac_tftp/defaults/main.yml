@@ -20,14 +20,24 @@ idrac_tftp_root: /srv/tftp/idrac-fw
 # version). Relative to the playbook dir.
 idrac_fw_staging: "{{ playbook_dir }}/../files/idrac-fw"
 
-# The staged firmware files for the THREE-hop Dell upgrade path on a 12th-gen
+# The staged firmware images for the THREE-hop Dell upgrade path on a 12th-gen
 # R720 (1.23.23 -> 1.66.65 -> 2.10.10.10 -> 2.65.65.65; 2.30.30.30 is NOT a
-# required step). Dell ships every version as firmimg.d7 — must be renamed.
-# The role fails if any is missing from idrac_fw_staging.
-idrac_fw_files:
-  - firmimg-1.66.65.d7
-  - firmimg-2.10.10.10.d7
-  - firmimg-2.65.65.65.d7
+# required step). Dell ships every version as firmimg.d7 — to avoid collisions
+# in one flat staging dir the user renames each to firmimg-<ver>.d7 under
+# files/idrac-fw/. This role then deploys each to <TFTP-root>/<ver>/firmimg.d7.
+#
+# WHY subdirs: iDRAC7 `racadm fwupdate -g -u -a <ip> -d <X>` treats <X> as a
+# DIRECTORY and always TFTP-GETs `<X>/firmimg.d7` (verified on fw 1.23.23 with
+# tcpdump). Giving `-d` the bare filename makes the iDRAC request
+# `firmimg-<ver>.d7/firmimg.d7` -> TFTP "not found" -> the misleading racadm
+# error "Remote host is not reachable or connection is interrupted" and NOTHING
+# is pulled. So we stage <root>/<version>/firmimg.d7 and flash with
+# `racadm fwupdate -g -u -a <tftp-ip> -d <version>`. The role fails if any
+# source file is missing from idrac_fw_staging.
+idrac_fw_images:
+  - { version: "1.66.65",    src: "firmimg-1.66.65.d7" }
+  - { version: "2.10.10.10", src: "firmimg-2.10.10.10.d7" }
+  - { version: "2.65.65.65", src: "firmimg-2.65.65.65.d7" }
 
 # true = install + start tftpd-hpa. false = teardown (stop + disable). Set
 # false and re-run after the upgrade to remove the LAN-wide TFTP daemon.
