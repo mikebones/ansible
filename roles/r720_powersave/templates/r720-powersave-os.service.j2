@@ -1,0 +1,13 @@
+[Unit]
+Description=r720 OS power tunings (WOL disable + runtime PM on unused NICs/USB)
+# WS7 Phase 1a. Runs once at boot after the network is up. The role also runs
+# it once live so settings take effect without a reboot.
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart={{ r720_os_script }}
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

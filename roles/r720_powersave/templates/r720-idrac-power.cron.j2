@@ -1,0 +1,6 @@
+# /etc/cron.d/r720-idrac-power — rendered by roles/r720_powersave (WS7).
+# Polls the host's own iDRAC (racadm) every minute and writes idrac_power.prom to
+# the node-exporter textfile dir. Only installed when r720_monitor_enabled.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+{{ r720_monitor_cron }} root {{ r720_monitor_script }}

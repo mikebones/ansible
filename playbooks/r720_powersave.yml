@@ -1,0 +1,38 @@
+---
+# WS7 — power saving on the Dell PowerEdge R720 worker nodes (hme-srv-02/03).
+# Three concerns, each gated: iDRAC power cap (racadm, live, no host reboot),
+# OS-side WOL/runtime-PM tunings, and an iDRAC textfile monitoring collector.
+# See roles/r720_powersave/defaults/main.yml + the WS7 plan.
+#
+# Run from WSL (the repo lives at /mnt/c/Users/Mike-/git/ansible, which is
+# world-writable so ansible.cfg is ignored — set paths via env vars):
+#
+#   REVIEW (render scripts + report current iDRAC power config; no changes):
+#     wsl bash -lc 'cd /mnt/c/Users/Mike-/git/ansible && \
+#       ANSIBLE_ROLES_PATH=roles ANSIBLE_INVENTORY=inventory \
+#       ANSIBLE_HOST_KEY_CHECKING=False \
+#       ansible-playbook playbooks/r720_powersave.yml'
+#
+#   APPLY the 190W power cap (live, no host reboot; reversible). One node first:
+#     wsl bash -lc '... ansible-playbook playbooks/r720_powersave.yml \
+#       -l hme-srv-02 -e r720_powersave_apply=true'
+#   then verify before doing hme-srv-03.
+#
+#   CLEAR the cap (set cfgServerPowerCapEnable=Disabled):
+#     ... -e r720_powersave_apply=true -e r720_power_cap_enabled=false
+#
+#   The OS tunings + monitoring collector apply by default (r720_os_powersave_enabled
+#   + r720_monitor_enabled are true); they need no host reboot. Override with
+#   -e r720_os_powersave_enabled=false / -e r720_monitor_enabled=false to skip.
+#
+# Phase 1b (iDRAC fw 1.23->2.65) + Phase 2 (BIOS DAPC + C-states, host reboot +
+# Longhorn drain) are separate, later — see ~/git/idrac/NOTES.md "Firmware
+# upgrade runbook" (Phase 1b prereq: user stages the Dell fw binaries in
+# files/idrac-fw/).
+
+- name: WS7 power saving on the R720 worker nodes
+  hosts: r720_nodes
+  become: yes
+  roles:
+    - role: r720_powersave
+      tags: [r720, powersave]

@@ -1,0 +1,33 @@
+#!/bin/bash
+# r720-powersave-os.sh — host-side OS power tunings for the R720 nodes (WS7).
+# Run once by r720-powersave-os.service at boot (and once live by the role).
+#
+# These are the marginal-but-cheap OS levers; the big idle-power win is BIOS
+# C-states (Phase 2, post-fw-upgrade). Governor is already schedutil (optimal),
+# left untouched. No NVMe / no SATA ALPM on the R720 (PERC/SAS).
+#
+# - Disable Wake-on-LAN on the unused NICs (eno1/2/3 + 10Gb enp68s0f0/f1).
+#   eno4 is the active uplink — never touched.
+# - Set runtime PM to auto on those unused NICs (lets the link powered-down
+#   devices suspend).
+# - Set USB autosuspend to auto (the R720 has no USB devices in active use).
+set -u
+IDLE_NICS="{{ r720_powersave_idle_nics | join(' ') }}"
+
+for n in $IDLE_NICS; do
+  [ -e "/sys/class/net/$n" ] || continue
+  if command -v ethtool >/dev/null 2>&1; then
+    ethtool -s "$n" wol d 2>/dev/null || true
+  fi
+  if [ -e "/sys/class/net/$n/device/power/control" ]; then
+    echo auto > "/sys/class/net/$n/device/power/control" 2>/dev/null || true
+  fi
+done
+
+# USB autosuspend: set every USB device to auto unless already configured.
+for c in /sys/bus/usb/devices/*/power/control; do
+  [ -e "$c" ] || continue
+  echo auto > "$c" 2>/dev/null || true
+done
+
+echo "r720-powersave-os: WOL disabled + runtime PM auto on {$IDLE_NICS}; USB autosuspend auto."

@@ -1,0 +1,193 @@
+---
+# Role: r720_powersave — see defaults/main.yml. WS7 power saving on the R720
+# worker nodes (hme-srv-02/03). Each concern is independently gated.
+
+# Only applies to R720 nodes with an iDRAC IP defined (hme-srv-02/03). The
+# r720_nodes inventory group + host_vars set idrac_ip; if a host lacks it, this
+# role is a no-op for it (don't fail the whole play — e.g. if run against a
+# broader group). Silent skip keeps the playbook composable.
+- name: Stat whether this host has an iDRAC (idrac_ip defined)
+  set_fact:
+    r720_has_idrac: "{{ idrac_ip is defined }}"
+
+# --- shared textfile dir (self-sufficient; matches node-exporter scrape) ----
+- name: Ensure node_exporter textfile dir exists
+  file:
+    path: "{{ r720_textfile_dir }}"
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+  when: r720_has_idrac | bool
+
+- name: Install sshpass (host SSHes to its own iDRAC for racadm)
+  apt:
+    name: sshpass
+    state: present
+    update_cache: yes
+  when: r720_has_idrac | bool
+
+# --- iDRAC credential file (root-only; sshpass -f keeps the password out of --
+# command lines / ps / ansible logs) ----------------------------------------
+- name: Ensure cred file dir exists
+  file:
+    path: "{{ r720_cred_file | dirname }}"
+    state: directory
+    mode: "0750"
+    owner: root
+    group: root
+  when: r720_has_idrac | bool
+
+- name: Render iDRAC credential file (root-only)
+  copy:
+    dest: "{{ r720_cred_file }}"
+    content: "{{ idrac_password }}\n"
+    mode: "0600"
+    owner: root
+    group: root
+  no_log: true
+  when: r720_has_idrac | bool
+
+# --- report current iDRAC power config (read-only, always) -----------------
+- name: Report current iDRAC power config (racadm getconfig)
+  command: "sshpass -f {{ r720_cred_file }} ssh {{ idrac_ssh_opts }} {{ idrac_user }}@{{ idrac_ip }} 'racadm getconfig -g cfgServerPower'"
+  register: idrac_power_report
+  changed_when: false
+  when: r720_has_idrac | bool
+
+- name: Show current iDRAC power config
+  debug:
+    msg: "{{ idrac_power_report.stdout_lines }}"
+  when:
+    - r720_has_idrac | bool
+    - idrac_power_report.stdout | default('') | length > 0
+  changed_when: false
+
+# --- set power cap (gated r720_powersave_apply) -----------------------------
+- name: Resolve cap-enable word
+  set_fact:
+    r720_cap_enable_word: "{{ 'Enabled' if (r720_power_cap_enabled | bool) else 'Disabled' }}"
+  when: r720_has_idrac | bool
+
+- name: Set iDRAC power cap enable (live, no host reboot)
+  command: "sshpass -f {{ r720_cred_file }} ssh {{ idrac_ssh_opts }} {{ idrac_user }}@{{ idrac_ip }} 'racadm config -g cfgServerPower -o cfgServerPowerCapEnable {{ r720_cap_enable_word }}'"
+  when:
+    - r720_has_idrac | bool
+    - r720_powersave_apply | bool
+  changed_when: true
+  register: idrac_cap_set
+
+- name: Set iDRAC power cap watts ({{ r720_power_cap_watts }} W)
+  command: "sshpass -f {{ r720_cred_file }} ssh {{ idrac_ssh_opts }} {{ idrac_user }}@{{ idrac_ip }} 'racadm config -g cfgServerPower -o cfgServerPowerCapWatts {{ r720_power_cap_watts }}'"
+  when:
+    - r720_has_idrac | bool
+    - r720_powersave_apply | bool
+    - r720_power_cap_enabled | bool
+  changed_when: true
+
+- name: Re-read iDRAC power config after cap set
+  command: "sshpass -f {{ r720_cred_file }} ssh {{ idrac_ssh_opts }} {{ idrac_user }}@{{ idrac_ip }} 'racadm getconfig -g cfgServerPower'"
+  register: idrac_power_after
+  changed_when: false
+  when:
+    - r720_has_idrac | bool
+    - r720_powersave_apply | bool
+
+- name: Show iDRAC power config after cap set
+  debug:
+    msg: "{{ idrac_power_after.stdout_lines }}"
+  when:
+    - r720_has_idrac | bool
+    - r720_powersave_apply | bool
+    - idrac_power_after.stdout | default('') | length > 0
+  changed_when: false
+
+# --- OS-side tunings (gated r720_os_powersave_enabled) ---------------------
+- name: Render r720 OS powersave script
+  template:
+    src: r720-powersave-os.sh.j2
+    dest: "{{ r720_os_script }}"
+    mode: "0755"
+    owner: root
+    group: root
+  when: r720_os_powersave_enabled | bool
+
+- name: Render r720 OS powersave systemd unit
+  template:
+    src: r720-powersave-os.service.j2
+    dest: "/etc/systemd/system/{{ r720_os_service }}"
+    mode: "0644"
+    owner: root
+    group: root
+  register: r720_os_unit
+  when: r720_os_powersave_enabled | bool
+
+- name: Reload systemd (unit rendered/changed)
+  systemd:
+    daemon_reload: yes
+  when:
+    - r720_os_powersave_enabled | bool
+    - r720_os_unit.changed | default(false)
+
+- name: Enable + start r720 OS powersave unit (runs once at boot + now)
+  systemd:
+    name: "{{ r720_os_service }}"
+    state: started
+    enabled: yes
+  when: r720_os_powersave_enabled | bool
+
+# --- iDRAC monitoring collector (gated r720_monitor_enabled) ----------------
+- name: Render r720 iDRAC power collector
+  template:
+    src: r720-idrac-power.py.j2
+    dest: "{{ r720_monitor_script }}"
+    mode: "0755"
+    owner: root
+    group: root
+  when:
+    - r720_has_idrac | bool
+    - r720_monitor_enabled | bool
+  register: r720_collector_rendered
+
+- name: Render r720 iDRAC power cron
+  template:
+    src: r720-idrac-power.cron.j2
+    dest: "{{ r720_monitor_cron_path }}"
+    mode: "0644"
+    owner: root
+    group: root
+  when:
+    - r720_has_idrac | bool
+    - r720_monitor_enabled | bool
+
+- name: Seed the first idrac_power.prom (run collector once now)
+  command: "{{ r720_monitor_script }}"
+  when:
+    - r720_has_idrac | bool
+    - r720_monitor_enabled | bool
+  changed_when: false
+
+- name: Verify idrac_power.prom was written
+  stat:
+    path: "{{ r720_textfile_dir }}/idrac_power.prom"
+  register: idrac_prom
+  changed_when: false
+  when:
+    - r720_has_idrac | bool
+    - r720_monitor_enabled | bool
+
+- name: Show idrac_power.prom (first 40 lines)
+  command: "head -40 {{ r720_textfile_dir }}/idrac_power.prom"
+  register: idrac_prom_show
+  changed_when: false
+  when:
+    - r720_has_idrac | bool
+    - r720_monitor_enabled | bool
+    - idrac_prom.stat.exists | default(false)
+
+- debug:
+    msg: "{{ idrac_prom_show.stdout_lines }}"
+  when:
+    - r720_has_idrac | bool
+    - r720_monitor_enabled | bool
+    - idrac_prom.stat.exists | default(false)

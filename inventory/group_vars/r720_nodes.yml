@@ -1,0 +1,10 @@
+---
+# group_vars/r720_nodes.yml
+# iDRAC7 credentials for the two R720 worker nodes (WS7, roles/r720_powersave).
+# Both iDRACs (192.168.1.252 + .253) use the Dell default root/calvin. The host
+# SSHes to its own iDRAC over the LAN (sshpass) to drive racadm for the power cap
+# + the monitoring collector. Committed to the private repo, consistent with the
+# existing ansible_ssh_pass in new_workers.yml (this is the established pattern
+# for node secrets in this private ansible repo).
+idrac_user: root
+idrac_password: calvin

@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+# r720-idrac-power.py — node-exporter textfile collector for the iDRAC7 power /
+# thermal / fan / PSU state on this host's own R720 iDRAC (hme-srv-02/03, WS7).
+#
+# sshpass-SSHes from the host to its iDRAC (LAN) and runs two racadm commands
+# (works on iDRAC7 fw 1.23.23, which predates Redfish/metrics endpoints):
+#   racadm getconfig -g cfgServerPower   -> actual/cap/avg watts, cap-enable
+#   racadm getsensorinfo                 -> inlet/exhaust temp, fan RPM, PSU status
+# Parses the column-aligned racadm output (cols split on 2+ spaces) and writes
+# Prometheus textfile metrics atomically (tmp + mv).
+#
+# Metrics (node-exporter adds instance/job labels):
+#   idrac_power_watts                     instantaneous actual power (W)
+#   idrac_power_cap_watts                 configured cap (W); =max capacity if cap disabled
+#   idrac_power_cap_enabled               1 if cap engaged, 0 if disabled
+#   idrac_power_avg_1h_watts              last-hour average (W)
+#   idrac_inlet_temp_celsius              inlet temp (C)
+#   idrac_exhaust_temp_celsius            exhaust temp (C)
+#   idrac_fan_rpm{fan="FanN"}             fan RPM
+#   idrac_psu_present{psu="PSN"}          1 if PSU input Present, 0 if lost
+#   idrac_psu_state{psu="PSN",state="..."} info gauge=1 (the raw state string)
+#
+# The WS7 Grafana alerts (manifests/monitoring/alerting/idrac.yaml) fire on:
+#   idrac_power_cap_enabled == 0          (cap got turned off / drift)
+#   idrac_power_watts / cap > 0.9         (near-cap throttling)
+#   idrac_psu_present == 0                (PSU lost input — e.g. .252 PS1)
+#   idrac_inlet_temp_celsius > 40          (cooling failure)
+import os, re, subprocess, tempfile
+
+IDRAC_IP    = "{{ idrac_ip }}"
+IDRAC_USER  = "{{ idrac_user }}"
+IDRAC_CRED  = "{{ r720_cred_file }}"   # root-only (0600); sshpass -f keeps the
+                                       # password out of ps / the python process
+OUT_DIR    = "{{ r720_textfile_dir }}"
+SSH_OPTS   = "{{ idrac_ssh_opts }}".split()
+
+def racadm(arg):
+    cmd = ["sshpass", "-f", IDRAC_CRED, "ssh"] + SSH_OPTS + \
+         ["%s@%s" % (IDRAC_USER, IDRAC_IP), "racadm " + arg]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        return r.stdout
+    except Exception:
+        return ""
+
+def watts_after(line, key):
+    # "cfgServerActualPowerConsumption=172 W | 587 Btu/hr" -> 172
+    m = re.search(re.escape(key) + r"\s*=?\s*(\d+)\s*W", line)
+    return m.group(1) if m else None
+
+def main():
+    power = racadm("getconfig -g cfgServerPower")
+    sensor = racadm("getsensorinfo")
+
+    actual = watts_after(power, "cfgServerActualPowerConsumption")
+    cap    = watts_after(power, "cfgServerPowerCapWatts")
+    avg1h  = watts_after(power, "cfgServerPowerLastHourAvg")
+    m = re.search(r"cfgServerPowerCapEnable\s*=\s*(\S+)", power)
+    cap_en = "1" if (m and m.group(1).strip().lower() == "enabled") else "0"
+
+    temps = {}      # Inlet -> C, Exhaust -> C
+    fans  = []      # [(FanN, rpm)]
+    psus  = []      # [(PSN, state)]
+    section = None
+    for line in sensor.splitlines():
+        s = line.strip()
+        if s.startswith("Sensor Type"):
+            section = s.split(":",1)[1].strip()
+            continue
+        if not section or not s:
+            continue
+        cols = re.split(r"\s{2,}", s.strip())
+        cols = [c.strip() for c in cols if c.strip()]
+        if len(cols) < 2:
+            continue
+        name, second = cols[0], cols[1]
+        if section == "TEMPERATURE" and len(cols) >= 3:
+            reading = cols[2].split()[0]          # "21 C" -> "21"
+            if "Inlet Temp" in name:
+                temps["inlet"] = reading
+            elif "Exhaust Temp" in name:
+                temps["exhaust"] = reading
+        elif section == "FAN" and len(cols) >= 3:
+            mf = re.search(r"Fan(\d+)", name)
+            if mf:
+                rpm = cols[2].split()[0]            # "1680 RPM" -> "1680"
+                fans.append(("Fan" + mf.group(1), rpm))
+        elif section == "POWER":
+            mf = re.search(r"PS(\d+)\s*Status", name)
+            if mf:
+                psus.append(("PS" + mf.group(1), second))   # second = state
+
+    lines = []
+    lines.append("# HELP idrac_power_watts Instantaneous actual power consumption (W)")
+    lines.append("# TYPE idrac_power_watts gauge")
+    if actual: lines.append("idrac_power_watts %s" % actual)
+    lines.append("# HELP idrac_power_cap_watts Configured power cap (W)")
+    lines.append("# TYPE idrac_power_cap_watts gauge")
+    if cap: lines.append("idrac_power_cap_watts %s" % cap)
+    lines.append("# HELP idrac_power_cap_enabled 1 if power cap engaged, 0 if disabled")
+    lines.append("# TYPE idrac_power_cap_enabled gauge")
+    lines.append("idrac_power_cap_enabled %s" % cap_en)
+    lines.append("# HELP idrac_power_avg_1h_watts Last-hour average power (W)")
+    lines.append("# TYPE idrac_power_avg_1h_watts gauge")
+    if avg1h: lines.append("idrac_power_avg_1h_watts %s" % avg1h)
+    lines.append("# HELP idrac_inlet_temp_celsius Inlet temperature (C)")
+    lines.append("# TYPE idrac_inlet_temp_celsius gauge")
+    if "inlet" in temps: lines.append("idrac_inlet_temp_celsius %s" % temps["inlet"])
+    lines.append("# HELP idrac_exhaust_temp_celsius Exhaust temperature (C)")
+    lines.append("# TYPE idrac_exhaust_temp_celsius gauge")
+    if "exhaust" in temps: lines.append("idrac_exhaust_temp_celsius %s" % temps["exhaust"])
+    lines.append("# HELP idrac_fan_rpm Fan speed (RPM)")
+    lines.append("# TYPE idrac_fan_rpm gauge")
+    for fan, rpm in fans:
+        lines.append('idrac_fan_rpm{fan="%s"} %s' % (fan, rpm))
+    lines.append("# HELP idrac_psu_present 1 if PSU input Present, 0 if lost/AC-Lost-Out-Range")
+    lines.append("# TYPE idrac_psu_present gauge")
+    for psu, state in psus:
+        present = "1" if state.strip().lower() == "present" else "0"
+        lines.append('idrac_psu_present{psu="%s"} %s' % (psu, present))
+    lines.append("# HELP idrac_psu_state Raw PSU state string (info gauge)")
+    lines.append("# TYPE idrac_psu_state gauge")
+    for psu, state in psus:
+        st = state.strip().replace('"', "").replace("\\", "")
+        lines.append('idrac_psu_state{psu="%s",state="%s"} 1' % (psu, st))
+    out = "\n".join(lines) + "\n"
+
+    os.makedirs(OUT_DIR, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".idrac_power.prom.", dir=OUT_DIR)
+    with os.fdopen(fd, "w") as f:
+        f.write(out)
+    os.chmod(tmp, 0o644)
+    final = os.path.join(OUT_DIR, "idrac_power.prom")
+    os.replace(tmp, final)
+
+if __name__ == "__main__":
+    main()

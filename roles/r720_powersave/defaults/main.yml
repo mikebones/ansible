@@ -1,0 +1,72 @@
+---
+# Role: r720_powersave — power saving on the Dell PowerEdge R720 worker nodes
+# (hme-srv-02/03). WS7. Three concerns, each independently gated:
+#   1. iDRAC power cap (cfgServerPower) — set live via racadm over SSH, no host
+#      reboot, reversible. The ONE power lever available on iDRAC7 fw 1.23.23
+#      (BIOS DAPC / C-states / fan control need the fw upgrade to 2.65 — Phase
+#      1b, see ~/git/idrac/NOTES.md "Firmware upgrade runbook"; the actual BIOS
+#      change then needs a host reboot — Phase 2).
+#   2. OS-side tunings — WOL disable + runtime PM auto on the unused NICs/USB.
+#      Minor (the Xeon + fans dominate idle power), but cheap + safe + no reboot.
+#   3. iDRAC monitoring collector — a node-exporter textfile *.prom exposing
+#      idrac_power_watts / cap / temps / fans / PSU status, for the WS7 Grafana
+#      alerts (manifests/monitoring/alerting/idrac.yaml).
+#
+# Targets the r720_nodes inventory group (hme-srv-02/03). Each host's iDRAC IP is
+# in host_vars/hme-srv-0{2,3}.yml; creds (idrac_user/idrac_password) in
+# group_vars/r720_nodes.yml (committed to the private repo, same convention as
+# the existing ansible_ssh_pass in new_workers.yml). sshpass is installed on the
+# host by this role — both the cap task and the collector SSH from the host to
+# its own iDRAC (LAN), so the metrics' instance label is the right node.
+#
+# Apply convention mirrors node_exporter_textfile / inotify_limits: a review run
+# (no -e) renders scripts + reports the current iDRAC power config; pass
+# -e r720_powersave_apply=true to set the cap live. The collector + OS tunings
+# apply whenever their own flags are true (low-risk, no reboot). Run one node
+# first: -l hme-srv-02.
+
+# --- iDRAC connection (idrac_ip per-host in host_vars; creds in group_vars) --
+# idrac_password is intentionally NOT defaulted here — it lives in
+# group_vars/r720_nodes.yml (secret, private repo). The role renders it to a
+# root-only credential file (r720_cred_file, mode 0600) and drives sshpass with
+# -f so the password never appears in a command line, `ps`, or ansible logs.
+idrac_user: root
+idrac_ssh_opts: "-o StrictHostKeyChecking=no -o ConnectTimeout=10"
+r720_cred_file: /etc/r720/idrac-cred
+
+# --- power cap (Phase 1a) ---------------------------------------------------
+# false = report current cap only (review). true = set the cap live via racadm.
+r720_powersave_apply: false
+# Aggressive 190W: R720s idle ~150W, daily-peak ~243W, capacity 487W. 190W forces
+# throttling in the normal working range (low risk for I/O-bound Longhorn
+# replicas, which are cordoned + lightly loaded). Reversible: set
+# r720_power_cap_enabled=false to clear the cap (cfgServerPowerCapEnable=Disabled).
+r720_power_cap_watts: 190
+r720_power_cap_enabled: true
+
+# --- OS-side tunings (Phase 1a) ---------------------------------------------
+r720_os_powersave_enabled: true
+# NICs to disable WOL + set runtime PM auto on. eno4 is the active uplink —
+# NEVER include it. The others are down/unused on the R720s (4x1Gb LOMs eno1-4,
+# 2x10Gb enp68s0f0/f1).
+r720_powersave_idle_nics:
+  - eno1
+  - eno2
+  - eno3
+  - enp68s0f0
+  - enp68s0f1
+r720_os_script: /usr/local/sbin/r720-powersave-os.sh
+r720_os_service: r720-powersave-os.service
+
+# --- iDRAC monitoring collector (Phase 1a) ---------------------------------
+r720_monitor_enabled: true
+r720_monitor_cron: "*/1 * * * *"
+r720_monitor_script: /usr/local/sbin/r720-idrac-power.py
+r720_monitor_cron_path: /etc/cron.d/r720-idrac-power
+
+# --- shared textfile dir (must match node-exporter --collector.textfile) ---
+# node-exporter scrapes this dir read-only (prometheus-node-exporter.extraArgs
+# --collector.textfile.directory + readOnly hostPath, WS5 Phase 3). r720_powersave
+# ensures the dir exists so the role is self-sufficient even if
+# roles/node_exporter_textfile hasn't been applied.
+r720_textfile_dir: /var/lib/node_exporter_textfile

@@ -1,0 +1,5 @@
+---
+# host_vars/hme-srv-03.yml
+# Dell PowerEdge R720 (12th-gen), dual Xeon E5-2650 0 @ 2.0 GHz, iDRAC7
+# fw 1.23.23. Service Tag JXNVMS1. WS7 power-saving target (roles/r720_powersave).
+idrac_ip: 192.168.1.253

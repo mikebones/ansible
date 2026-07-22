@@ -1,0 +1,8 @@
+---
+# host_vars/hme-srv-02.yml
+# Dell PowerEdge R720 (12th-gen), dual Xeon E5-2650 0 @ 2.0 GHz, iDRAC7
+# fw 1.23.23. Service Tag JXNVNL1. WS7 power-saving target (roles/r720_powersave).
+# Note (2026-07-21): PS1 reports AC-Lost-Out-Range — one PSU has lost input
+# (redundancy lost); flagged by the idrac-psu-redundancy-lost alert. Not a
+# power-tuning issue — investigate the dead PSU / unplugged cable separately.
+idrac_ip: 192.168.1.252
