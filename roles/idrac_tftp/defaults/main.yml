@@ -20,10 +20,13 @@ idrac_tftp_root: /srv/tftp/idrac-fw
 # version). Relative to the playbook dir.
 idrac_fw_staging: "{{ playbook_dir }}/../files/idrac-fw"
 
-# The two staged firmware files (Dell ships both as firmimg.d7 — must be
-# renamed). The role fails if either is missing from idrac_fw_staging.
+# The staged firmware files for the THREE-hop Dell upgrade path on a 12th-gen
+# R720 (1.23.23 -> 1.66.65 -> 2.10.10.10 -> 2.65.65.65; 2.30.30.30 is NOT a
+# required step). Dell ships every version as firmimg.d7 — must be renamed.
+# The role fails if any is missing from idrac_fw_staging.
 idrac_fw_files:
-  - firmimg-2.30.30.30.d7
+  - firmimg-1.66.65.d7
+  - firmimg-2.10.10.10.d7
   - firmimg-2.65.65.65.d7
 
 # true = install + start tftpd-hpa. false = teardown (stop + disable). Set

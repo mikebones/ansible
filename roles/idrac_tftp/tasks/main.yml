@@ -16,11 +16,13 @@
 - name: Fail if any firmware file is missing (user prerequisite not done)
   fail:
     msg: >-
-      Missing {{ item.item }} in {{ idrac_fw_staging }}. Download the Dell
-      iDRAC7 firmware .exe (2.30.30.30 and 2.65.65.65) from the R720 driver
-      page, run each on Windows to extract firmimg.d7, rename to
-      {{ item.item }}, and place it in {{ idrac_fw_staging }}/. See
-      ~/git/idrac/NOTES.md "Firmware upgrade runbook".
+      Missing {{ item.item }} in {{ idrac_fw_staging }}. The Dell-required
+      12th-gen R720 path is 1.23.23 -> 1.66.65 -> 2.10.10.10 -> 2.65.65.65
+      (three hops; 2.30.30.30 is NOT needed). Download each Dell Application
+      .exe from the R720 driver page (or dl.dell.com CDN with a Referer
+      header), extract firmimg.d7 with 7-Zip, rename to {{ item.item }}, and
+      place it in {{ idrac_fw_staging }}/. See ~/git/idrac/NOTES.md
+      "Firmware upgrade runbook" (download is automatable — see prereq there).
   loop: "{{ idrac_fw_stat.results }}"
   when: not item.stat.exists
 

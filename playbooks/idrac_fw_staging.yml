@@ -8,9 +8,14 @@
 # world-writable so ansible.cfg is ignored — set paths via env vars):
 #
 #   PREREQ: place the Dell firmware binaries in files/idrac-fw/ first:
-#     firmimg-2.30.30.30.d7   (from iDRAC_with_Lifecycle_Controller_2.30.30.30.exe)
-#     firmimg-2.65.65.65.d7   (from iDRAC_with_Lifecycle_Controller_2.65.65.65.exe)
-#   (gitignored — Dell-licensed, user-supplied.)
+#     firmimg-1.66.65.d7     (from iDRAC7__1.66.65__A00.exe,      FOLDER02705808M)
+#     firmimg-2.10.10.10.d7  (from iDRAC8_2.10.10.10_A00.exe,     FOLDER02880990M)
+#     firmimg-2.65.65.65.d7  (from iDRAC_2.65.65.65_A00.exe,      FOLDER06110020M)
+#   Three-hop Dell-required path on a 12th-gen R720: 1.23.23 -> 1.66.65 ->
+#   2.10.10.10 -> 2.65.65.65 (2.30.30.30 is NOT a required step; the earlier
+#   "1.23 -> 2.30 -> 2.65" two-step was WRONG and would brick the iDRAC).
+#   (gitignored — Dell-licensed, user-supplied. Download is automatable: the
+#   dl.dell.com CDN only checks the Referer header — see ~/git/idrac/NOTES.md.)
 #
 # Stage TFTP + deploy the fw files:
 #   wsl bash -lc 'cd /mnt/c/Users/Mike-/git/ansible && \
@@ -18,7 +23,7 @@
 #     ANSIBLE_HOST_KEY_CHECKING=False \
 #     ansible-playbook playbooks/idrac_fw_staging.yml'
 #
-# Then run ~/git/idrac/idrac-fwupdate.py per iDRAC (2.30 then 2.65).
+# Then run ~/git/idrac/idrac-fwupdate.py per iDRAC (--step 166, 210, 265).
 #
 # Teardown after the upgrade (stop + disable the LAN-wide TFTP daemon):
 #   ... ansible-playbook playbooks/idrac_fw_staging.yml -e idrac_tftp_enabled=false
