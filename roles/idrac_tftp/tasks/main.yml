@@ -12,6 +12,11 @@
   loop: "{{ idrac_fw_files }}"
   register: idrac_fw_stat
   changed_when: false
+  # files/idrac-fw/ lives on the ansible CONTROLLER (WSL/Windows), not on the
+  # remote hme-srv-01 — stat the path there, not on the TFTP host. The copy
+  # task below reads src from the controller automatically.
+  delegate_to: localhost
+  become: false
 
 - name: Fail if any firmware file is missing (user prerequisite not done)
   fail:
