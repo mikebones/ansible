@@ -10,3 +10,6 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 {% if node_textfile_nfs_probe %}
 {{ node_textfile_nfs_cron }} root {{ node_textfile_script_dir }}/node-exporter-textfile-nfs-probe.sh
 {% endif %}
+{% if node_textfile_inotify_enabled %}
+{{ node_textfile_inotify_cron }} root {{ node_textfile_script_dir }}/node-exporter-textfile-inotify.sh
+{% endif %}

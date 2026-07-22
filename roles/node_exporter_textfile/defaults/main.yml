@@ -43,6 +43,19 @@ node_textfile_zfs_pools: []
 # Cron schedule for the ZFS collector.
 node_textfile_zfs_cron: "*/5 * * * *"
 
+# --- inotify instance collector (universal) --------------------------------
+# Counts inotify instances per UID + emits node_inotify_instances_exhausted
+# (count of UIDs at/over fs.inotify.max_user_instances). That is the real
+# cause of the chronic "failed to create fsnotify watcher: too many open files"
+# spam: a UID (root, since every container runs as root) pegged at the
+# per-user inotify INSTANCE limit -> inotify_init1() EMFILE. hme-srv-02/03 ship
+# the kernel-7.0 default 128 and had root pinned at it; roles/inotify_limits
+# raises it to 8192. Enabled cluster-wide on home_server (the textfile scope)
+# because the signal is universal and cheap; pre-fix it fires on hme-srv-02/03,
+# post-fix it is silent, and hme-srv-01 is the healthy baseline.
+node_textfile_inotify_enabled: true
+node_textfile_inotify_cron: "*/1 * * * *"
+
 # --- NFS wedge probe config (D.1-D.2) ---------------------------------------
 # A lightweight mount.nfs + umount canary: attempts to mount an export from the
 # NFS server (hme-srv-01) and reports rc / duration. On a wedged kernel-7.0

@@ -1,0 +1,26 @@
+---
+# Fix the chronic "failed to create fsnotify watcher: too many open files" log
+# spam on hme-srv-02/03. Root cause + rationale in roles/inotify_limits/defaults.
+#
+# Run from WSL (repo at /mnt/c/Users/Mike-/git/ansible, world-writable so
+# ansible.cfg is ignored — set paths via env vars):
+#
+# 1. Review only (reports current limits on every node, changes nothing):
+#      wsl bash -lc 'cd /mnt/c/Users/Mike-/git/ansible && \
+#        ANSIBLE_ROLES_PATH=roles ANSIBLE_INVENTORY=inventory \
+#        ANSIBLE_HOST_KEY_CHECKING=False \
+#        ansible-playbook playbooks/inotify_limits.yml'
+#      Expect hme-srv-02/03 at 128; hme-srv-01 + rp5* at 8192.
+#
+# 2. APPLY (sets fs.inotify.max_user_instances=8192 + max_user_watches=524288
+#    live + persisted to /etc/sysctl.d/99-inotify.conf; no pod/containerd
+#    restart — the EMFILE stops within seconds):
+#      ... ansible-playbook playbooks/inotify_limits.yml -e inotify_apply=true
+#    Verify: query Loki for "failed to create fsnotify watcher" on hme-srv-02/03
+#    pods over the next 5m -> count drops to ~0.
+
+- name: raise inotify instance/watch limits on all k8s nodes
+  hosts: k8s_nodes
+  become: yes
+  roles:
+    - role: inotify_limits

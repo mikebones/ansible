@@ -30,6 +30,17 @@
   when: node_textfile_zfs_enabled | bool
   register: node_textfile_zfs_script
 
+# --- inotify instance collector (universal; home_server scope) --------------
+- name: Render inotify instance textfile collector script
+  template:
+    src: inotify.prom.sh.j2
+    dest: "{{ node_textfile_script_dir }}/node-exporter-textfile-inotify.sh"
+    owner: root
+    group: root
+    mode: "0755"
+  when: node_textfile_inotify_enabled | bool
+  register: node_textfile_inotify_script
+
 # --- NFS wedge probe (D.1-D.2) ----------------------------------------------
 # RISK: see defaults/main.yml. Rendered only when node_textfile_nfs_probe=true.
 - name: Render NFS wedge probe script
@@ -56,7 +67,8 @@
   debug:
     msg: >-
       Rendered {{ node_textfile_cron_pending }}
-      (zfs={{ node_textfile_zfs_enabled }} nfs_probe={{ node_textfile_nfs_probe }}).
+      (zfs={{ node_textfile_zfs_enabled }} nfs_probe={{ node_textfile_nfs_probe }}
+      inotify={{ node_textfile_inotify_enabled }}).
       Review it, then re-run with -e node_textfile_apply=true to install the cron
       live and seed the first *.prom files.
 
@@ -82,10 +94,16 @@
   when: (node_textfile_apply | bool) and (node_textfile_nfs_probe | bool)
   changed_when: false
 
+- name: Seed inotify *.prom now (run the collector once)
+  command: "{{ node_textfile_script_dir }}/node-exporter-textfile-inotify.sh"
+  when: (node_textfile_apply | bool) and (node_textfile_inotify_enabled | bool)
+  changed_when: false
+
 - name: Report activation
   debug:
     msg: >-
       node_textfile_apply=true: cron installed at {{ node_textfile_cron_path }}
-      (zfs={{ node_textfile_zfs_enabled }} nfs_probe={{ node_textfile_nfs_probe }}).
+      (zfs={{ node_textfile_zfs_enabled }} nfs_probe={{ node_textfile_nfs_probe }}
+      inotify={{ node_textfile_inotify_enabled }}).
       First *.prom files seeded; node-exporter will expose them on the next scrape.
   when: node_textfile_apply | bool

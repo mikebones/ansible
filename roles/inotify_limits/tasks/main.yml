@@ -1,0 +1,45 @@
+---
+# Role: inotify_limits — raise fs.inotify.max_user_instances / max_user_watches.
+# See defaults/main.yml for the root-cause rationale. Gated by inotify_apply.
+
+- name: Report current inotify limits (review; inotify_apply={{ inotify_apply }})
+  command: "sysctl fs.inotify.max_user_instances fs.inotify.max_user_watches"
+  register: inotify_current
+  changed_when: false
+  become: yes
+
+- name: Show current inotify limits
+  debug:
+    var: inotify_current.stdout_lines
+
+- name: Raise fs.inotify.max_user_instances (live + persisted)
+  sysctl:
+    name: fs.inotify.max_user_instances
+    value: "{{ inotify_max_user_instances | string }}"
+    state: present
+    reload: yes
+    sysctl_file: "{{ inotify_sysctl_file }}"
+  become: yes
+  when: inotify_apply | bool
+
+- name: Raise fs.inotify.max_user_watches (live + persisted)
+  sysctl:
+    name: fs.inotify.max_user_watches
+    value: "{{ inotify_max_user_watches | string }}"
+    state: present
+    reload: yes
+    sysctl_file: "{{ inotify_sysctl_file }}"
+  become: yes
+  when: inotify_apply | bool
+
+- name: Re-confirm inotify limits after apply
+  command: "sysctl fs.inotify.max_user_instances fs.inotify.max_user_watches"
+  register: inotify_after
+  changed_when: false
+  become: yes
+  when: inotify_apply | bool
+
+- name: Show inotify limits after apply
+  debug:
+    var: inotify_after.stdout_lines
+  when: inotify_apply | bool

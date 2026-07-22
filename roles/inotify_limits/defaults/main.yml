@@ -1,0 +1,35 @@
+---
+# Role: inotify_limits — raise the per-user inotify instance + watch limits.
+#
+# Root cause of the chronic "failed to create fsnotify watcher: too many open
+# files" log spam (89 pods, ~956 lines/hr each, all on hme-srv-02/03): those R720
+# nodes run kernel 7.0 (Ubuntu 26.04) which ships the DEFAULT
+# fs.inotify.max_user_instances=128. Every container runs as root (UID 0), and
+# root was pinned at exactly 128 inotify instances -> every new inotify_init1()
+# returned EMFILE ("too many open files") -> Go fsnotify logged the watcher
+# failure. hme-srv-01 and the rp5 nodes are already at 8192 (only ~305 used) so
+# they never hit it — which is exactly why every chatty pod landed on hme-srv-02.
+#
+# This is NOT a per-process RLIMIT_NOFILE problem (Go apps raise soft->hard to
+# 524288 on startup and use ~12 fds; a prior misdiagnosis built a containerd
+# LimitNOFILE drop-in for it — that was reverted, it fixed the wrong limit).
+#
+# The fix is a node sysctl: raise max_user_instances (and max_user_watches for
+# headroom) to 8192 / 524288. Applied LIVE + instantly (no containerd restart,
+# no pod restart — the 128 existing instances stay, new ones are allowed, and
+# the fsnotify retry loops succeed within seconds). Persisted in
+# /etc/sysctl.d/99-inotify.conf so it survives reboot.
+#
+# Idempotent + a no-op on nodes already at/above the target (hme-srv-01, rp5*).
+# Gated by inotify_apply (default false) to match the repo's review-first
+# convention; pass -e inotify_apply=true to set the sysctl live.
+
+# target limits
+inotify_max_user_instances: 8192
+inotify_max_user_watches: 524288
+
+# persistence file
+inotify_sysctl_file: /etc/sysctl.d/99-inotify.conf
+
+# master gate (false = report current values only, do not change)
+inotify_apply: false

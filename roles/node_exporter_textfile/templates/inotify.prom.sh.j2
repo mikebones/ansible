@@ -1,0 +1,67 @@
+#!/bin/bash
+# node-exporter textfile collector: per-UID inotify instance usage + exhaustion.
+#
+# Detects the real cause of "failed to create fsnotify watcher: too many open
+# files": a UID (typically root, UID 0 — every container runs as root) hitting
+# fs.inotify.max_user_instances. inotify_init1() then returns EMFILE ("too many
+# open files") -> Go fsnotify logs the watcher failure. hme-srv-02/03 shipped the
+# kernel-7.0 default 128 and had UID 0 pinned at it; this metric fires there
+# pre-fix and goes silent once roles/inotify_limits raises the limit to 8192.
+#
+# Emitted metrics:
+#   node_inotify_max_user_instances            kernel per-user inotify instance limit
+#   node_inotify_instances{uid}                inotify instances held by UID
+#   node_inotify_instances_exhausted           count of UIDs at/over the limit
+#                                             (alert signal: >0 => EMFILE is occurring)
+#
+# Atomic write: build in a tmp file, mv into place so node-exporter never reads
+# a half-written file. No bash arrays: the bash array-length idiom (dollar-brace-
+# hash) collides with Jinja2's comment-open delimiter during templating — see
+# zfs.prom.sh.j2.
+set -u
+
+OUT_DIR="{{ node_textfile_dir }}"
+TMP="${OUT_DIR}/.inotify.prom.$$"
+FINAL="${OUT_DIR}/inotify.prom"
+
+LIMIT=$(cat /proc/sys/fs/inotify/max_user_instances 2>/dev/null || echo 0)
+
+# Count inotify instances per owning UID. Walk every fd of every process,
+# readlink it, match anon_inode:inotify*, and look up the owning pid's UID.
+# Emits "uid count" lines to COUNTS (plain text, not a bash array).
+COUNTS=$(
+  for f in /proc/[0-9]*/fd/*; do
+    [ -L "$f" ] || continue
+    tgt=$(readlink "$f" 2>/dev/null) || continue
+    case "$tgt" in
+      anon_inode:inotify*|inotify*)
+        pid=${f#/proc/}; pid=${pid%%/*}
+        awk '/^Uid:/{print $2}' "/proc/$pid/status" 2>/dev/null
+        ;;
+    esac
+  done | sort -n | uniq -c | awk '{print $2, $1}'
+)
+
+EXHAUSTED=0
+{
+  echo "# HELP node_inotify_max_user_instances kernel fs.inotify.max_user_instances (per-user inotify instance limit)"
+  echo "# TYPE node_inotify_max_user_instances gauge"
+  echo "node_inotify_max_user_instances $LIMIT"
+  echo "# HELP node_inotify_instances inotify instances held by processes of this UID"
+  echo "# TYPE node_inotify_instances gauge"
+  echo "# HELP node_inotify_instances_exhausted count of UIDs at/over max_user_instances (EMFILE on new inotify_init -> fsnotify watcher failures)"
+  echo "# TYPE node_inotify_instances_exhausted gauge"
+  if [ -n "$COUNTS" ]; then
+    while read -r uid count; do
+      [ -n "$uid" ] || continue
+      echo "node_inotify_instances{uid=\"$uid\"} $count"
+      if [ "$LIMIT" -gt 0 ] && [ "$count" -ge "$LIMIT" ]; then
+        EXHAUSTED=$(( EXHAUSTED + 1 ))
+      fi
+    done <<< "$COUNTS"
+  fi
+  echo "node_inotify_instances_exhausted $EXHAUSTED"
+} > "$TMP"
+
+mv -f "$TMP" "$FINAL"
+chmod 0644 "$FINAL"
