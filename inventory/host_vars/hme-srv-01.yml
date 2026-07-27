@@ -25,6 +25,17 @@ containerd_snapshotter: overlayfs
 # docs/incident-2026-07-20-hme-srv-01-zfs-destroy-wedge.md.
 zfs_recover_enabled: true
 
+# ARC was still at the role's 50%-of-RAM default (~11.65 GiB, set 2026-07-20)
+# despite this host absorbing hme-srv-02/03's cordoned workload since then -
+# pod memory REQUESTS alone hit 89% of allocatable while ARC sat at its full
+# cap, leaving ~719Mi free / 1.8Gi available system-wide (2026-07-27).
+# Pinned well below the role's 5 GiB hard_min (zfs_arc_min_bytes) so that
+# floor - not a %-of-RAM figure - governs the cap on this specific node; a
+# plain `ansible-playbook playbooks/tune_storage.yml --tags zfs` (no -e)
+# now reproduces the same 5 GiB cap applied live 2026-07-27 without needing
+# to remember `-e zfs_arc_pct=15` by hand.
+zfs_arc_pct: 15
+
 # Apply per-dataset recordsize/atime/xattr (idempotent; mirrors live state set
 # during WS1 + adds plex-config recordsize=16K). recordsize is new-writes-only.
 zfs_tuning_enabled: true
