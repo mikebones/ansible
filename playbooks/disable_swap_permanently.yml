@@ -1,0 +1,63 @@
+---
+# playbooks/disable_swap_permanently.yml
+#
+# Incident 2026-07-30: a full power cycle brought rp5-0's kubelet back up
+# with swap still on. This kubelet version hard-fails when swap is enabled
+# ("running with swap on is not supported"), so kubelet crash-looped (287
+# restarts in 49 minutes) and never started kube-apiserver's static pod -
+# rp5-0 is the sole control-plane node, so the ENTIRE cluster was
+# unreachable for the whole outage window.
+#
+# roles/kubeadm_install already disables swap, but only targets fresh
+# Ubuntu joins (hme-srv-*) - it was never run against the rp5 (Raspberry Pi
+# OS) nodes, which were provisioned separately ~2 years ago. Worse: on
+# Raspberry Pi OS, swap is managed by the dphys-swapfile service, which
+# recreates and re-enables /var/swap on every boot regardless of fstab -
+# commenting out the fstab line alone (what roles/kubeadm_install does)
+# does NOT survive a reboot on these nodes. That's the actual gap this
+# closes: swapoff + fstab comment-out (belt) + disabling/masking
+# dphys-swapfile so it can never re-enable swap on boot again (suspenders).
+# dphys-swapfile doesn't exist on the Ubuntu nodes (hme-srv-*) - the task
+# is written to no-op cleanly there rather than skip them, so this one
+# playbook is safe to run against the whole k8s_nodes group regardless of
+# OS.
+#
+# Run from WSL (see playbooks/fix_node_prereqs.yml for why):
+#   wsl bash -lc 'cd /mnt/c/Users/Mike-/git/ansible && \
+#     ANSIBLE_ROLES_PATH=roles ANSIBLE_INVENTORY=inventory \
+#     ANSIBLE_HOST_KEY_CHECKING=False \
+#     ansible-playbook playbooks/disable_swap_permanently.yml'
+
+- name: Disable swap permanently on every node, regardless of OS
+  hosts: k8s_nodes
+  become: yes
+  tasks:
+    - name: Turn off any currently-active swap
+      command: swapoff -a
+      changed_when: false
+
+    - name: Comment out swap entries in fstab
+      replace:
+        path: /etc/fstab
+        regexp: '^([^#].*\bswap\b.*)$'
+        replace: '# \1'
+
+    - name: Check whether dphys-swapfile exists (Raspberry Pi OS only)
+      service_facts:
+
+    - name: Disable and mask dphys-swapfile so it can't re-enable swap on boot
+      systemd:
+        name: dphys-swapfile
+        enabled: false
+        masked: true
+        state: stopped
+      when: "'dphys-swapfile.service' in ansible_facts.services"
+
+    - name: Confirm no swap is active
+      command: cat /proc/swaps
+      register: swap_check
+      changed_when: false
+
+    - name: Show swap state
+      debug:
+        msg: "{{ inventory_hostname }}: {{ swap_check.stdout_lines }}"
