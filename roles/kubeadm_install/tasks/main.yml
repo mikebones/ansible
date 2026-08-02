@@ -60,6 +60,26 @@
     state: present
     update_cache: yes
 
+# nfs-common installs rpcbind/rpc-statd but doesn't enable them by default -
+# found 2026-08-02 on the rp5 nodes (both inactive) while investigating a
+# transmission-music stalled-torrent incident. Real NFS locking (NLM) needs
+# rpc.statd running client-side for its crash-recovery/monitoring protocol;
+# without it, mounts stay usable with `nolock` but can't safely switch to
+# real locking. hme-srv-01 (the NFS server) already has rpcbind/rpc-statd/
+# nfs-server active with nlockmgr registered - only the client side was
+# missing this. Enabling on all nodes (harmless on ones with no NFS mounts).
+- name: Enable and start rpcbind (required for NFS locking)
+  systemd:
+    name: rpcbind
+    enabled: yes
+    state: started
+
+- name: Enable and start rpc-statd (NFS lock manager crash recovery)
+  systemd:
+    name: rpc-statd
+    enabled: yes
+    state: started
+
 - name: Ensure /etc/containerd directory exists
   file:
     path: /etc/containerd

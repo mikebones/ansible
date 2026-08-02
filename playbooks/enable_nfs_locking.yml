@@ -1,0 +1,48 @@
+---
+# playbooks/enable_nfs_locking.yml
+# One-shot: enable + start rpcbind/rpc-statd on the rp5 nodes.
+#
+# Found 2026-08-02 while investigating a transmission-music stalled-torrent
+# incident: nfs-common installs rpcbind/rpc-statd but doesn't enable them by
+# default, and both were inactive on the rp5 nodes (confirmed on rp5-3). The
+# NFS server (hme-srv-01) already has rpcbind/rpc-statd/nfs-server active
+# with nlockmgr registered - only the client side was missing this. Real NFS
+# locking (NLM) needs rpc.statd running client-side for its crash-recovery/
+# monitoring protocol; without it, real locking can hang or fail
+# unpredictably, so the transmission NFS PVs currently use `nolock`. This
+# playbook is the prerequisite before that can safely change. Also added
+# durably to roles/kubeadm_install/tasks/main.yml for future node builds;
+# this playbook applies it to the already-joined rp5 nodes without rejoining.
+#
+# Run from WSL (the repo lives at /mnt/c/Users/Mike-/git/ansible, which is
+# world-writable so ansible.cfg is ignored - set paths via env vars):
+#   wsl bash -lc 'cd /mnt/c/Users/Mike-/git/ansible && \
+#     ANSIBLE_ROLES_PATH=roles ANSIBLE_INVENTORY=inventory \
+#     ANSIBLE_HOST_KEY_CHECKING=False \
+#     ansible-playbook playbooks/enable_nfs_locking.yml'
+
+- name: Enable NFS locking prerequisites on the rp5 nodes
+  hosts: rp5_nodes
+  become: yes
+  tasks:
+    - name: Enable and start rpcbind
+      systemd:
+        name: rpcbind
+        enabled: yes
+        state: started
+
+    - name: Enable and start rpc-statd
+      systemd:
+        name: rpc-statd
+        enabled: yes
+        state: started
+
+    - name: Confirm nlockmgr is registered against the NFS server
+      command: rpcinfo -T tcp hme-srv-01 nlockmgr
+      register: nlockmgr_check
+      changed_when: false
+      failed_when: false
+
+    - name: Show nlockmgr negotiation result
+      debug:
+        msg: "{{ inventory_hostname }}: {{ nlockmgr_check.stdout | default(nlockmgr_check.stderr) }}"
