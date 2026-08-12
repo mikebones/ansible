@@ -31,7 +31,12 @@
 - name: Pin k8s API hostname in /etc/hosts
   lineinfile:
     path: /etc/hosts
-    regexp: "{{ k8s_api_hostname }}$"
+    # Matches the WHOLE line (IP + hostname + any trailing whitespace), not
+    # just "hostname$" — a bare "$" anchor is defeated by a trailing space
+    # after the hostname (found live on hme-srv-01 2026-08-11: left a stale
+    # duplicate entry pointing at the OLD ip during the control-plane HA VIP
+    # repoint, since glibc's resolver uses the first matching line).
+    regexp: '^[0-9.]+\s+{{ k8s_api_hostname | regex_escape() }}\s*$'
     line: "{{ k8s_api_ip }} {{ k8s_api_hostname }}"
     state: present
 

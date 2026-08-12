@@ -1,0 +1,176 @@
+---
+# Role: k8s_node_prereqs
+# Shared OS-level prep for any node joining the cluster, as either a worker or
+# a control-plane member: containerd, kernel modules, sysctls, swap disable,
+# pinned kubelet/kubeadm/kubectl packages. Extracted from roles/kubeadm_install
+# 2026-08-11 (control-plane HA work) — this is exactly what that role ran
+# before its own join-specific steps; behavior for the existing worker-join
+# path is unchanged, it just delegates here first. See defaults/main.yml for
+# why the version vars need a per-group override for hosts already on the
+# current cluster version.
+
+- name: Pin k8s API hostname in /etc/hosts (avoid systemd-resolved DNS flakes)
+  lineinfile:
+    path: /etc/hosts
+    # Matches the WHOLE line (IP + hostname + any trailing whitespace), not
+    # just "hostname$" — hme-srv-01's existing entry had a trailing space
+    # after the hostname, which defeated a bare "$"-anchored match and left
+    # a stale duplicate line (first match wins in glibc's resolver, so it was
+    # silently still resolving to the OLD ip) when the VIP repoint first ran
+    # 2026-08-11. This regexp matches regardless of the current IP or any
+    # trailing whitespace, so it always replaces rather than appends.
+    regexp: '^[0-9.]+\s+{{ k8s_api_hostname | regex_escape() }}\s*$'
+    line: "{{ k8s_api_ip }} {{ k8s_api_hostname }}"
+    state: present
+
+- name: Install apt prerequisites
+  apt:
+    name:
+      - ca-certificates
+      - curl
+      - gnupg
+      - apt-transport-https
+    state: present
+    update_cache: yes
+
+- name: Ensure apt keyrings directory
+  file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+- name: Download and dearmor the pkgs.k8s.io signing key (always refresh — keys expire)
+  shell: |
+    curl -fsSL https://pkgs.k8s.io/core:/stable:/v{{ k8s_join_minor }}/deb/Release.key \
+      | gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+- name: Add the pkgs.k8s.io apt repository
+  copy:
+    dest: /etc/apt/sources.list.d/kubernetes.list
+    content: |
+      deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{ k8s_join_minor }}/deb/ /
+    mode: "0644"
+
+- name: Install containerd
+  apt:
+    name: containerd
+    state: present
+    update_cache: yes
+
+# nfs-common provides /sbin/mount.nfs — required for NFS PV mounts. The
+# rebuilt hme-srv-02/03 (Ubuntu 26.04) shipped without it, so every NFS-backed
+# PV (ftp, lidarr, navidrome, syncthing, transmission-movies) failed with
+# "bad option; you might need a /sbin/mount.<type> helper". Installed here so
+# future node builds/joins include it from the start.
+- name: Install nfs-common (NFS PV mount helper)
+  apt:
+    name: nfs-common
+    state: present
+    update_cache: yes
+
+# nfs-common installs rpcbind/rpc-statd but doesn't enable them by default -
+# found 2026-08-02 on the rp5 nodes (both inactive) while investigating a
+# transmission-music stalled-torrent incident. Real NFS locking (NLM) needs
+# rpc.statd running client-side for its crash-recovery/monitoring protocol;
+# without it, mounts stay usable with `nolock` but can't safely switch to
+# real locking. hme-srv-01 (the NFS server) already has rpcbind/rpc-statd/
+# nfs-server active with nlockmgr registered - only the client side was
+# missing this. Enabling on all nodes (harmless on ones with no NFS mounts).
+- name: Enable and start rpcbind (required for NFS locking)
+  systemd:
+    name: rpcbind
+    enabled: yes
+    state: started
+
+- name: Enable and start rpc-statd (NFS lock manager crash recovery)
+  systemd:
+    name: rpc-statd
+    enabled: yes
+    state: started
+
+- name: Ensure /etc/containerd directory exists
+  file:
+    path: /etc/containerd
+    state: directory
+    mode: "0755"
+
+- name: Generate containerd default config
+  shell: containerd config default > /etc/containerd/config.toml
+  args:
+    creates: /etc/containerd/config.toml
+
+- name: Use systemd cgroup driver (match cluster)
+  replace:
+    path: /etc/containerd/config.toml
+    regexp: 'SystemdCgroup = false'
+    replace: 'SystemdCgroup = true'
+
+- name: Set sandbox image to match cluster imageRepository
+  replace:
+    path: /etc/containerd/config.toml
+    regexp: 'sandbox_image = ".*"'
+    replace: 'sandbox_image = "{{ k8s_pause_image }}"'
+
+- name: Restart and enable containerd
+  systemd:
+    name: containerd
+    state: restarted
+    daemon_reload: yes
+    enabled: yes
+
+- name: Load kernel modules at boot
+  copy:
+    dest: /etc/modules-load.d/k8s.conf
+    content: "overlay\nbr_netfilter\n"
+    mode: "0644"
+
+- name: Load kernel modules now
+  command: modprobe {{ item }}
+  loop:
+    - overlay
+    - br_netfilter
+  changed_when: false
+
+- name: Set sysctls for Kubernetes networking
+  sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    state: present
+    reload: yes
+  loop:
+    - { key: net.bridge.bridge-nf-call-iptables, value: "1" }
+    - { key: net.bridge.bridge-nf-call-ip6tables, value: "1" }
+    - { key: net.ipv4.ip_forward, value: "1" }
+
+- name: Disable swap (kubelet requirement)
+  command: swapoff -a
+  changed_when: false
+
+- name: Comment out swap entries in fstab
+  replace:
+    path: /etc/fstab
+    regexp: '^([^#].*\bswap\b.*)$'
+    replace: '# \1'
+
+- name: Install kubelet/kubeadm/kubectl pinned to {{ k8s_join_patch }}
+  apt:
+    name:
+      - "kubelet={{ k8s_join_patch }}"
+      - "kubeadm={{ k8s_join_patch }}"
+      - "kubectl={{ k8s_join_patch }}"
+    state: present
+    update_cache: yes
+
+- name: Hold k8s packages at the pinned version
+  dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop:
+    - kubelet
+    - kubeadm
+    - kubectl
+
+- name: Enable kubelet (will crash-loop until joined — expected)
+  systemd:
+    name: kubelet
+    enabled: yes

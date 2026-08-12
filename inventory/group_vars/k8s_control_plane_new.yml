@@ -1,0 +1,18 @@
+---
+# group_vars/k8s_control_plane_new.yml
+# Temporary group (inventory/hosts.yml) for rp5-1/rp5-2 while they're being
+# converted from worker to control-plane member — see playbooks/join_control_plane.yml
+# and roles/kubeadm_control_plane_join.
+#
+# Both nodes are ALREADY on the cluster's current version (confirmed live
+# 2026-08-11: kubeadm=kubectl=kubelet=1.36.2-2.1, held, on both). Overriding
+# roles/k8s_node_prereqs's stale 1.29 fallback defaults here to match what's
+# already installed — requesting a different explicit version against a held
+# package would fight the existing install instead of being a no-op.
+k8s_join_minor: "1.36"
+k8s_join_patch: "1.36.2-2.1"
+
+# Fleet-wide actual value confirmed live on rp5-0/rp5-1/rp5-2/rp5-3 (2026-08-11)
+# — the role's own default (3.9) is stale and would otherwise rewrite this on
+# every run, forcing an avoidable containerd restart for a pure image-tag churn.
+k8s_pause_image: "registry.k8s.io/pause:3.6"

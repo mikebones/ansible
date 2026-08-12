@@ -1,0 +1,17 @@
+---
+# Role: k8s_node_prereqs — defaults
+# Extracted from roles/kubeadm_install 2026-08-11 (control-plane HA work) so
+# roles/kubeadm_control_plane_join can reuse the same OS-prep steps without a
+# third copy of the same ~150 lines. Behavior is unchanged for the existing
+# worker-join path: roles/kubeadm_install still imports this role first, and
+# group_vars/new_workers.yml still overrides these to the older bootstrap
+# version brand-new hardware joins at (upgraded later via upgrade_k8s.yml
+# hops). For a host that is already ON the current cluster version (e.g. an
+# existing worker being promoted to control-plane), override these per-group
+# to match its already-installed version instead — the package task below
+# uses an explicit version string, and requesting a version that doesn't
+# match a held package can conflict with the existing install.
+
+k8s_join_minor: "1.29"
+k8s_join_patch: "1.29.7-1.1"
+k8s_pause_image: "registry.k8s.io/pause:3.9"

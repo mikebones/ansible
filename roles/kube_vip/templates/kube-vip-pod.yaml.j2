@@ -1,0 +1,73 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kube-vip
+  namespace: kube-system
+spec:
+  hostNetwork: true
+  hostAliases:
+    # Confirmed live 2026-08-11: kube-vip's own leader-election client does
+    # NOT read the mounted admin.conf's `server:` field — it targets a
+    # hardcoded https://kubernetes:6443 regardless (visible in its logs as
+    # literal DNS lookup failures for host "kubernetes" against the cluster
+    # resolver). This is the standard, documented kube-vip static-pod fix:
+    # pin that literal hostname straight to the local apiserver, always
+    # reachable directly since this pod runs hostNetwork:true on a
+    # control-plane node itself. Has nothing to do with k8s_api_hostname/DNS.
+    - ip: 127.0.0.1
+      hostnames:
+        - kubernetes
+  containers:
+    - name: kube-vip
+      image: "{{ kube_vip_image }}"
+      imagePullPolicy: IfNotPresent
+      args:
+        - manager
+      env:
+        - name: vip_arp
+          value: "true"
+        - name: port
+          value: "6443"
+        - name: vip_nodename
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: vip_interface
+          value: "{{ kube_vip_interface }}"
+        - name: vip_cidr
+          value: "32"
+        - name: cp_enable
+          value: "true"
+        - name: cp_namespace
+          value: kube-system
+        - name: vip_leaderelection
+          value: "true"
+        - name: vip_leasename
+          value: plndr-cp-lock
+        - name: vip_leaseduration
+          value: "5"
+        - name: vip_renewdeadline
+          value: "3"
+        - name: vip_retryperiod
+          value: "1"
+        - name: address
+          value: "{{ k8s_vip_ip }}"
+        # Explicitly false — MetalLB already owns Service type=LoadBalancer
+        # for this cluster; kube-vip here is control-plane-VIP only and must
+        # not also start watching/advertising Services.
+        - name: svc_enable
+          value: "false"
+      securityContext:
+        capabilities:
+          add:
+            - NET_ADMIN
+            - NET_RAW
+      volumeMounts:
+        - mountPath: /etc/kubernetes/admin.conf
+          name: kubeconfig
+          readOnly: true
+  volumes:
+    - name: kubeconfig
+      hostPath:
+        path: /etc/kubernetes/admin.conf
+        type: FileOrCreate

@@ -1,0 +1,36 @@
+---
+# Role: kube_vip
+# Drops the kube-vip static pod manifest onto a control-plane node. Kubelet
+# watches /etc/kubernetes/manifests/ directly (same mechanism as etcd/
+# apiserver themselves) and picks up a new or changed file with no service
+# restart needed — this is why static pods are the standard kubeadm-bare-metal
+# way to run kube-vip, rather than a Deployment (which would depend on the
+# scheduler/API being up, circular for something fronting the API itself).
+
+- name: Template the kube-vip static pod manifest
+  template:
+    src: kube-vip-pod.yaml.j2
+    dest: /etc/kubernetes/manifests/kube-vip.yaml
+    owner: root
+    group: root
+    mode: "0644"
+  register: kube_vip_manifest
+
+# Static pods mirror into the API as Pod objects named <manifest-name>-<node>;
+# checking via kubectl (against this node's own local apiserver) is more
+# robust than shelling out to crictl and parsing its JSON, and confirmed live
+# 2026-08-11 that crictl's own output isn't reliably parseable here.
+# `command` (unlike most modules) runs for real even under --check, so this
+# is explicitly excluded from check mode — nothing to poll for since the
+# manifest itself was never actually written.
+- name: Wait for the kube-vip static pod to be Running (kubelet mirrors it to the API)
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  command: "kubectl get pod -n kube-system kube-vip-{{ inventory_hostname }} -o jsonpath={.status.phase}"
+  become: yes
+  register: kube_vip_phase
+  until: kube_vip_phase.stdout == "Running"
+  retries: 12
+  delay: 5
+  changed_when: false
+  when: kube_vip_manifest.changed and not ansible_check_mode

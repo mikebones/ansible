@@ -1,12 +1,10 @@
 ---
 # Role: kubeadm_install
-# Defaults for installing kubeadm on a fresh Ubuntu node and joining it as a
-# worker. The authoritative values live in group_vars/new_workers.yml; these are
-# fallbacks so the role is usable standalone.
-
-k8s_join_minor: "1.29"                 # pkgs.k8s.io apt repo channel (v1.29)
-k8s_join_patch: "1.29.7-1.1"           # kubelet/kubeadm/kubectl full apt version
-k8s_pause_image: "registry.k8s.io/pause:3.9"  # matches cluster imageRepository
+# Defaults for joining a fresh node as a worker. The OS-prep version pins
+# (k8s_join_minor/k8s_join_patch/k8s_pause_image) now live in
+# roles/k8s_node_prereqs/defaults/main.yml, which this role imports first —
+# see that file for the authoritative fallbacks and group_vars/new_workers.yml
+# for the real values used on actual joins.
 
 # Set by play 1 of playbooks/join_nodes.yml (kubeadm join ... --token ... --hash).
 kubeadm_join_cmd: ""

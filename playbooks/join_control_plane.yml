@@ -1,0 +1,73 @@
+---
+# playbooks/join_control_plane.yml
+# Control-plane HA: join rp5-1 and rp5-2 to the control plane / etcd,
+# alongside the existing sole member rp5-0, fronted by a kube-vip VIP.
+#
+# Run from WSL (the repo lives at /mnt/c/Users/Mike-/git/ansible, which is
+# world-writable so ansible.cfg is ignored — set paths via env vars):
+#   wsl bash -lc 'cd /mnt/c/Users/Mike-/git/ansible && \
+#     ANSIBLE_ROLES_PATH=roles ANSIBLE_INVENTORY=inventory \
+#     ANSIBLE_HOST_KEY_CHECKING=False \
+#     ansible-playbook playbooks/join_control_plane.yml [--limit ...] [--tags ...]'
+#
+# EXECUTION ORDER — run as SEPARATE invocations with verification between each,
+# not one continuous run (see docs/ once written, and the plan this came from):
+#   1. --tags vip_bootstrap        deploy kube-vip to rp5-0 ALONE first.
+#                                   Verify k8s_vip_ip answers identically to
+#                                   rp5-0's bare IP before doing anything else.
+#   2. (separate, manual/manifests-repo step: repoint DNS + re-run the
+#      /etc/hosts pin cluster-wide to the VIP — see the plan doc. Verify every
+#      API client still works before continuing.)
+#   3. --tags cp_join --limit rp5-1   verify etcd shows 2 members before continuing.
+#   4. --tags cp_join --limit rp5-2   verify etcd shows 3 members (HA achieved).
+#
+# rp5-1/rp5-2 are NOT fresh nodes — they've been joined WORKERS for 2+ years.
+# roles/kubeadm_control_plane_join detects this and does the required
+# drain -> delete Node -> kubeadm reset -> rejoin sequence itself; this is
+# genuinely disruptive to whichever node is currently being converted (pods
+# evicted/rescheduled, Longhorn replicas on it rebuild elsewhere), not a pure
+# addition. That's why `serial: 1` here is load-bearing, not just a style
+# choice — never join/convert 2 control-plane nodes at once.
+
+- name: Generate control-plane join command (needs kubeadm CLI on an existing CP node)
+  hosts: rp5-0
+  become: yes
+  tags: [cp_join]
+  tasks:
+    - name: Upload control-plane certs and generate a certificate key
+      command: kubeadm init phase upload-certs --upload-certs
+      register: upload_certs_output
+      changed_when: true
+
+    - name: Extract the certificate key (last line of upload-certs output)
+      set_fact:
+        cp_certificate_key: "{{ upload_certs_output.stdout_lines[-1] }}"
+
+    - name: Generate the join command (token + CA-cert hash)
+      command: kubeadm token create --print-join-command
+      register: join_cmd_output
+      changed_when: true
+
+    - name: Compose the full control-plane join command
+      set_fact:
+        kubeadm_cp_join_cmd: "{{ join_cmd_output.stdout }} --control-plane --certificate-key {{ cp_certificate_key }}"
+        cacheable: yes
+
+    - name: Show the resulting join command (certificate key valid ~2h)
+      debug:
+        msg: "{{ kubeadm_cp_join_cmd }}"
+
+- name: Deploy kube-vip to rp5-0 alone (safest starting point, before any etcd change)
+  hosts: rp5-0
+  become: yes
+  tags: [vip_bootstrap]
+  roles:
+    - kube_vip
+
+- name: Join rp5-1, then rp5-2, one at a time onto the control plane
+  hosts: k8s_control_plane_new
+  become: yes
+  serial: 1
+  tags: [cp_join]
+  roles:
+    - kubeadm_control_plane_join

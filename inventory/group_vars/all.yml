@@ -9,4 +9,16 @@ longhorn_api: http://longhorn.costascomputers.com
 # hostname to the control-plane LAN IP so kubelet never depends on DNS for it.
 # roles/kubeadm_install and roles/kubeadm_upgrade both ensure this pin is present.
 k8s_api_hostname: "k8s.costascomputers.com"
-k8s_api_ip: "192.168.1.166"
+# 2026-08-11: moved to the kube-vip VIP (control-plane HA rollout) — was
+# rp5-0's bare IP (192.168.1.166). kube-vip verified live on rp5-0 alone
+# first (ARP/healthz/kubectl through it) and pihole's DNS record for this
+# hostname already repointed (manifests repo, charts/pihole) before this
+# changed, per the HA plan's explicit "both must move together" warning.
+k8s_api_ip: "192.168.1.60"
+
+# kube-vip control-plane VIP (roles/kube_vip, playbooks/join_control_plane.yml).
+# Outside pihole's live DHCP pool (192.168.1.126-250) and MetalLB's IPAddressPool
+# (192.168.1.65-126), confirmed 2026-08-11. Same value as k8s_api_ip above now
+# that both have moved — kept as a separate var since kube_vip's own role
+# references it by this name specifically.
+k8s_vip_ip: "192.168.1.60"

@@ -1,0 +1,19 @@
+---
+# Role: kube_vip — defaults
+# Static-pod kube-vip deployment fronting the k8s apiserver with a floating
+# VIP (ARP mode — single-L2 network, no BGP needed). See group_vars/all.yml
+# for k8s_vip_ip (the actual VIP, cluster-wide) and playbooks/join_control_plane.yml
+# for how this role is sequenced against etcd membership changes.
+
+# All 3 control-plane nodes (rp5-0/1/2) confirmed on eth0 (2026-08-11).
+# Override per-host in inventory/host_vars/ if a future CP node differs.
+kube_vip_interface: eth0
+
+kube_vip_image: "ghcr.io/kube-vip/kube-vip:v0.8.9"
+
+# ARP (Layer 2) mode: one node holds the VIP at a time via gratuitous ARP,
+# leader-elected through the same apiserver the VIP fronts (kube-vip uses a
+# local kubeconfig for this, not the VIP itself, to avoid the obvious
+# chicken-and-egg). Appropriate for this cluster: single L2 segment, no
+# router/BGP peering available.
+kube_vip_interface_mode: ARP

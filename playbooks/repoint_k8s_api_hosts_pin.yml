@@ -1,0 +1,42 @@
+---
+# playbooks/repoint_k8s_api_hosts_pin.yml
+# One-shot: re-run the k8s API hostname /etc/hosts pin (roles/k8s_node_prereqs'
+# and roles/kubeadm_upgrade's first task) across every node that already has
+# it, now that group_vars/all.yml's k8s_api_ip points at the kube-vip VIP
+# instead of rp5-0's bare IP.
+#
+# Control-plane HA rollout step 2 (see the plan doc). kube-vip already
+# verified live on rp5-0 alone, and pihole's DNS record for this hostname
+# already repointed (manifests repo, charts/pihole) before this runs -
+# both had to move together, per that plan's explicit warning, or nodes
+# keep resolving straight to rp5-0 regardless of what this pin says.
+#
+# Run from WSL (the repo lives at /mnt/c/Users/Mike-/git/ansible, which is
+# world-writable so ansible.cfg is ignored — set paths via env vars):
+#   wsl bash -lc 'cd /mnt/c/Users/Mike-/git/ansible && \
+#     ANSIBLE_ROLES_PATH=roles ANSIBLE_INVENTORY=inventory \
+#     ANSIBLE_HOST_KEY_CHECKING=False \
+#     ansible-playbook playbooks/repoint_k8s_api_hosts_pin.yml'
+
+- name: Repoint the k8s API hostname /etc/hosts pin to the VIP
+  hosts: k8s_nodes
+  become: yes
+  tasks:
+    - name: Pin k8s API hostname in /etc/hosts
+      lineinfile:
+        path: /etc/hosts
+        # See roles/k8s_node_prereqs/tasks/main.yml — a bare "hostname$"
+        # anchor is defeated by trailing whitespace (found live on
+        # hme-srv-01, left a stale duplicate pointing at the OLD ip).
+        regexp: '^[0-9.]+\s+{{ k8s_api_hostname | regex_escape() }}\s*$'
+        line: "{{ k8s_api_ip }} {{ k8s_api_hostname }}"
+        state: present
+
+    - name: Confirm this node resolves the API hostname to the new pin
+      command: "getent hosts {{ k8s_api_hostname }}"
+      register: hosts_check
+      changed_when: false
+
+    - name: Show resolution result
+      debug:
+        msg: "{{ inventory_hostname }}: {{ hosts_check.stdout }}"

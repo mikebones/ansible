@@ -1,0 +1,9 @@
+---
+# Role: kubeadm_control_plane_join — defaults
+# Set by play 1 of playbooks/join_control_plane.yml, which runs on rp5-0 (an
+# existing control-plane node — `kubeadm init phase upload-certs` needs the
+# kubeadm CLI reading /etc/kubernetes/pki locally, unlike a plain worker join
+# which only needs kubectl on the control machine). Read here via
+# hostvars['rp5-0']['kubeadm_cp_join_cmd'], not hostvars['localhost'] like
+# roles/kubeadm_install's worker-join fact.
+kubeadm_cp_join_cmd: ""
