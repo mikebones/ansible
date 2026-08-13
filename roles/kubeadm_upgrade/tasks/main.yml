@@ -141,13 +141,27 @@
     msg: "target minor={{ k8s_target_minor }} kubeadm_semver={{ kubeadm_semver }} debver={{ kubeadm_debver }}"
 
 # ── CONTROL PLANE: kubeadm upgrade apply ───────────────────────────
+# 2026-08-12: `kubeadm upgrade apply` regenerates every static-pod manifest
+# from kubeadm's stored ClusterConfiguration - any manual /etc/kubernetes/
+# manifests/*.yaml edit not fed through --patches is silently reverted on
+# the next upgrade hop. Sync the same shared patches dir used by
+# kubeadm_control_plane_join (kube-apiserver memory request/limit fix) so
+# it survives here too.
+- name: Sync kubeadm static-pod patches
+  import_role:
+    name: kubeadm_patches
+  when: inventory_hostname in groups['k8s_control_plane']
+
 # --ignore-preflight-errors=CreateJob: kubeadm's preflight creates a health-check
 # Job that must Complete within 15s. A cold pull of the agnhost image (~10s on
 # nodes without it cached) blows that budget and fails the check even though the
 # cluster is healthy (verified independently via kubectl after each hop). This is
 # the standard workaround for that flaky check.
 - name: Apply upgrade plan on control plane (kubeadm upgrade apply)
-  command: "kubeadm upgrade apply {{ kubeadm_semver }} -y --ignore-preflight-errors=CreateJob"
+  command: >
+    kubeadm upgrade apply {{ kubeadm_semver }} -y
+    --ignore-preflight-errors=CreateJob
+    --patches=/etc/kubernetes/patches
   timeout: "{{ kubeadm_upgrade_timeout }}"
   when: inventory_hostname in groups['k8s_control_plane']
 

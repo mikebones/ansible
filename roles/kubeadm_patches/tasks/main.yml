@@ -1,0 +1,22 @@
+---
+# Role: kubeadm_patches
+# Syncs kubeadm's static-pod customization patches (strategic-merge YAML,
+# one file per component under files/kubeadm-patches/) to /etc/kubernetes/
+# patches on a control-plane node. Imported by both kubeadm_control_plane_join
+# and kubeadm_upgrade, since both trigger kubeadm to regenerate the static
+# pod manifests (kube-apiserver, etcd, scheduler, controller-manager) from
+# scratch - a manifest hand-edited directly via SSH (e.g. an emergency fix)
+# has no persistence otherwise. Callers pass --patches=/etc/kubernetes/patches
+# on their own kubeadm command.
+
+- name: Ensure /etc/kubernetes/patches exists
+  file:
+    path: /etc/kubernetes/patches
+    state: directory
+    mode: "0755"
+
+- name: Sync kubeadm static-pod patches
+  copy:
+    src: kubeadm-patches/
+    dest: /etc/kubernetes/patches/
+    mode: "0644"

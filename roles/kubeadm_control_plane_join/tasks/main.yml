@@ -71,13 +71,24 @@
   import_role:
     name: k8s_node_prereqs
 
+# 2026-08-12: kubeadm regenerates every static-pod manifest (kube-apiserver,
+# etcd, scheduler, controller-manager) from scratch on join/upgrade - any
+# hand-edit made directly to a live /etc/kubernetes/manifests/*.yaml (e.g. an
+# emergency SSH fix) is silently lost the next time this role or
+# kubeadm_upgrade runs, since neither previously passed --patches. Populated
+# here so it's already in place before the join command below generates the
+# manifests - see roles/kubeadm_patches for the shared patch files.
+- name: Sync kubeadm static-pod patches
+  import_role:
+    name: kubeadm_patches
+
 - name: Check if this node has already joined as control-plane (post-prep)
   stat:
     path: /etc/kubernetes/kubelet.conf
   register: kubelet_conf_now
 
 - name: Join the control plane
-  command: "{{ hostvars['rp5-0']['kubeadm_cp_join_cmd'] }}"
+  command: "{{ hostvars['rp5-0']['kubeadm_cp_join_cmd'] }} --patches=/etc/kubernetes/patches"
   when: not kubelet_conf_now.stat.exists
   register: cp_join_result
   changed_when: true
@@ -91,19 +102,15 @@
   import_role:
     name: kube_vip
 
-# Matches the taint restored on rp5-0 earlier today after it accumulated
-# unbounded general workload under CPU pressure — new control-plane members
-# start tainted from the outset so they don't repeat that.
-- name: Taint this node NoSchedule for control-plane role
-  delegate_to: rp5-0
-  environment:
-    KUBECONFIG: /etc/kubernetes/admin.conf
-  command: >
-    kubectl taint node {{ inventory_hostname }}
-    node-role.kubernetes.io/control-plane:NoSchedule
-    --overwrite
-  changed_when: true
-
+# 2026-08-12: this role previously tainted every new control-plane node
+# NoSchedule. Removed - this is a 5-node Pi cluster with no capacity to
+# reserve control-plane nodes for control-plane-only duty; general
+# workloads (transmission, vault-0, pihole, etc.) genuinely need to run on
+# rp5-1/rp5-2/rp5-3 alongside the control-plane role. Confirmed live
+# 2026-08-12 that no node in the cluster actually carries this taint today
+# - leaving the task in place would have silently reintroduced it (and
+# broken scheduling for those workloads) the next time a control-plane node
+# was reset and rejoined.
 - name: Wait for this node to show Ready with the control-plane role
   delegate_to: rp5-0
   environment:

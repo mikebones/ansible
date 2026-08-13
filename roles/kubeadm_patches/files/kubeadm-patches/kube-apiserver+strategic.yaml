@@ -1,0 +1,28 @@
+# kubeadm static-pod patch (strategic merge), applied via --patches on
+# `kubeadm join --control-plane` / `kubeadm upgrade apply` / `kubeadm upgrade
+# node`. Without this, kube-apiserver.yaml is regenerated from kubeadm's
+# stored ClusterConfiguration on every join/upgrade with NO memory
+# request/limit at all - confirmed live 2026-08-12 as the root cause of
+# kube-apiserver-rp5-0 getting SIGKILLed by the kernel OOM-killer (9 restarts)
+# during an rp5-2 memory-pressure spike. `priorityClassName:
+# system-node-critical` (already set by kubeadm) only affects k8s-level
+# scheduling/eviction ordering, not the Linux OOM-killer - a real memory
+# request is what's needed so kubelet accounts for this pod's footprint
+# against other pods on the same node.
+#
+# Sizing: live usage observed at 632Mi before this fix; 768Mi request / 2Gi
+# limit gives comfortable headroom for a ~72-Application cluster.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kube-apiserver
+  namespace: kube-system
+spec:
+  containers:
+  - name: kube-apiserver
+    resources:
+      requests:
+        cpu: 250m
+        memory: 768Mi
+      limits:
+        memory: 2Gi
