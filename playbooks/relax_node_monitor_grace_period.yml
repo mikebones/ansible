@@ -1,0 +1,65 @@
+---
+# playbooks/relax_node_monitor_grace_period.yml
+# One-shot: raise kube-controller-manager's --node-monitor-grace-period
+# from the k8s default (40s) to 90s on every control-plane node.
+#
+# WHY: rp5-0 went NodeNotReady for ~14m on 2026-08-17 under real CPU
+# pressure (30 pods on a 4-core control-plane node, ~3 cores of container
+# usage alone before kubelet/etcd/apiserver overhead). A longer grace
+# period absorbs brief kubelet-heartbeat-delay blips under moderate
+# pressure without meaningfully weakening real dead-node detection (a
+# genuinely dead node still gets marked NotReady, just ~50s later - a
+# non-issue for a homelab with no HA-failover SLA).
+#
+# NOT A FIX for pod-level liveness-probe restarts (e.g. transmission-
+# movies' own restart during this incident) - that's governed
+# independently by each pod's own probe timeoutSeconds/failureThreshold,
+# not by this controller-manager flag. This only reduces node-level
+# NotReady flapping (which drives cluster-wide pod eviction/rescheduling
+# decisions), a different mechanism.
+#
+# kube-controller-manager runs HA across all 3 control-plane nodes
+# (leader-elect) - editing the static pod manifest just restarts that
+# node's OWN controller-manager container (kubelet watches
+# /etc/kubernetes/manifests/ and restarts on change); does not touch the
+# node itself, does not risk vault-0's Raft quorum (unrelated subsystem)
+# - safe to run against rp5-2 despite the "don't reboot rp5-2" caution
+# elsewhere, since nothing here reboots anything.
+#
+# Run from WSL (see repoint_k8s_api_hosts_pin.yml's header for why):
+#   wsl bash -lc 'cd /mnt/c/Users/Mike-/git/ansible && \
+#     ANSIBLE_ROLES_PATH=roles ANSIBLE_INVENTORY=inventory \
+#     ANSIBLE_HOST_KEY_CHECKING=False \
+#     ansible-playbook playbooks/relax_node_monitor_grace_period.yml'
+
+- name: Relax kube-controller-manager's node-monitor-grace-period
+  hosts: k8s_control_plane
+  become: yes
+  tasks:
+    - name: Check current grace-period flag is not already set
+      command: grep -c 'node-monitor-grace-period' /etc/kubernetes/manifests/kube-controller-manager.yaml
+      register: existing_flag
+      changed_when: false
+      failed_when: false
+
+    - name: Insert --node-monitor-grace-period=90s after the cluster-cidr arg
+      lineinfile:
+        path: /etc/kubernetes/manifests/kube-controller-manager.yaml
+        insertafter: '^\s*- --cluster-cidr=10\.0\.0\.0/8\s*$'
+        line: "    - --node-monitor-grace-period=90s"
+        state: present
+      when: existing_flag.stdout == "0"
+
+    - name: Wait for kubelet to restart the static pod with the new manifest
+      pause:
+        seconds: 15
+      when: existing_flag.stdout == "0"
+
+    - name: Confirm the flag is present
+      command: grep 'node-monitor-grace-period' /etc/kubernetes/manifests/kube-controller-manager.yaml
+      register: confirm_flag
+      changed_when: false
+
+    - name: Show result
+      debug:
+        msg: "{{ inventory_hostname }}: {{ confirm_flag.stdout }}"
